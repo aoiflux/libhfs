@@ -55,6 +55,9 @@ type Volume struct {
 	reader ioReaderAt
 	kind   FileSystemKind
 	header VolumeHeader
+	// baseOffset is the byte offset where the parsed HFS+ volume starts on disk.
+	// It is zero for non-wrapper volumes.
+	baseOffset int64
 }
 
 type BTreeNodeDescriptor struct {

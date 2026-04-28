@@ -21,6 +21,34 @@ func parseExtentsRecord(payload []byte) ([]ExtentDescriptor, error) {
 	return extents, nil
 }
 
+func parseExtentsRecordHFS(payload []byte) ([]ExtentDescriptor, error) {
+	const extRecSize = 3 * 4
+	if len(payload) < extRecSize {
+		return nil, &ParseError{Op: "parse_extents_record_hfs", Offset: 0, Err: ErrCorrupt}
+	}
+
+	extents := make([]ExtentDescriptor, 0, 3)
+	for i := 0; i < 3; i++ {
+		base := i * 4
+		e := ExtentDescriptor{
+			StartBlock: uint32(be16(payload[base : base+2])),
+			BlockCount: uint32(be16(payload[base+2 : base+4])),
+		}
+		if e.StartBlock == 0 && e.BlockCount == 0 {
+			break
+		}
+		extents = append(extents, e)
+	}
+	return extents, nil
+}
+
+func (v *Volume) parseExtentsRecordByKind(payload []byte) ([]ExtentDescriptor, error) {
+	if v != nil && v.kind == KindHFS {
+		return parseExtentsRecordHFS(payload)
+	}
+	return parseExtentsRecord(payload)
+}
+
 func compactExtents(input []ExtentDescriptor) []ExtentDescriptor {
 	out := make([]ExtentDescriptor, 0, len(input))
 	for _, e := range input {
@@ -105,7 +133,7 @@ func (v *Volume) resolveForkExtentsFromFork(cnid uint32, fork ForkData, forkType
 		if key.FileID != cnid || key.ForkType != forkType {
 			return nil
 		}
-		extents, err := parseExtentsRecord(payload)
+		extents, err := v.parseExtentsRecordByKind(payload)
 		if err != nil {
 			return nil
 		}

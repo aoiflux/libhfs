@@ -8,6 +8,10 @@ type catalogLeafCallback func(key CatalogKey, payload []byte) error
 type extentsLeafCallback func(key ExtentsKey, payload []byte) error
 
 func (v *Volume) walkCatalogBTree(cb catalogLeafCallback) error {
+	if v.kind == KindHFS {
+		return v.walkCatalogLeafChain(cb)
+	}
+
 	hdr, err := v.CatalogBTreeHeader()
 	if err != nil {
 		return err
@@ -16,7 +20,7 @@ func (v *Volume) walkCatalogBTree(cb catalogLeafCallback) error {
 		return &ParseError{Op: "walk_catalog_btree", Offset: 0, Err: ErrInvalidBTreeNode}
 	}
 
-	treeStart := int64(v.header.CatalogFile.Extents[0].StartBlock) * int64(v.header.BlockSize)
+	treeStart := v.diskOffset(int64(v.header.CatalogFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
 	state := catalogWalkState{
 		vol:      v,
 		header:   hdr,
@@ -27,6 +31,10 @@ func (v *Volume) walkCatalogBTree(cb catalogLeafCallback) error {
 }
 
 func (v *Volume) walkExtentsBTree(cb extentsLeafCallback) error {
+	if v.kind == KindHFS {
+		return v.walkExtentsLeafChain(cb)
+	}
+
 	hdr, err := v.ExtentsBTreeHeader()
 	if err != nil {
 		return err
@@ -35,7 +43,7 @@ func (v *Volume) walkExtentsBTree(cb extentsLeafCallback) error {
 		return &ParseError{Op: "walk_extents_btree", Offset: 0, Err: ErrInvalidBTreeNode}
 	}
 
-	treeStart := int64(v.header.ExtentsFile.Extents[0].StartBlock) * int64(v.header.BlockSize)
+	treeStart := v.diskOffset(int64(v.header.ExtentsFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
 	state := extentsWalkState{
 		vol:      v,
 		header:   hdr,
@@ -73,7 +81,7 @@ func (s *catalogWalkState) walkNode(nodeNum uint32, cb catalogLeafCallback) erro
 	switch desc.Type {
 	case btreeNodeTypeIdx:
 		for _, rec := range extractNodeRecords(node, desc) {
-			_, consumed, err := parseCatalogKey(rec)
+			_, consumed, err := parseCatalogKeyForKind(s.vol.kind, rec)
 			if err != nil {
 				continue
 			}
@@ -88,7 +96,7 @@ func (s *catalogWalkState) walkNode(nodeNum uint32, cb catalogLeafCallback) erro
 		return nil
 	case btreeNodeTypeLeaf:
 		for _, rec := range extractNodeRecords(node, desc) {
-			key, consumed, err := parseCatalogKey(rec)
+			key, consumed, err := parseCatalogKeyForKind(s.vol.kind, rec)
 			if err != nil {
 				continue
 			}
@@ -119,7 +127,7 @@ func (s *extentsWalkState) walkNode(nodeNum uint32, cb extentsLeafCallback) erro
 	switch desc.Type {
 	case btreeNodeTypeIdx:
 		for _, rec := range extractNodeRecords(node, desc) {
-			_, consumed, err := parseExtentsKey(rec)
+			_, consumed, err := parseExtentsKeyForKind(s.vol.kind, rec)
 			if err != nil {
 				continue
 			}
@@ -134,7 +142,7 @@ func (s *extentsWalkState) walkNode(nodeNum uint32, cb extentsLeafCallback) erro
 		return nil
 	case btreeNodeTypeLeaf:
 		for _, rec := range extractNodeRecords(node, desc) {
-			key, consumed, err := parseExtentsKey(rec)
+			key, consumed, err := parseExtentsKeyForKind(s.vol.kind, rec)
 			if err != nil {
 				continue
 			}
@@ -163,7 +171,7 @@ func (v *Volume) walkCatalogLeafChain(cb catalogLeafCallback) error {
 		return &ParseError{Op: "walk_catalog_leaf_chain", Offset: 0, Err: ErrInvalidBTreeNode}
 	}
 
-	treeStart := int64(v.header.CatalogFile.Extents[0].StartBlock) * int64(v.header.BlockSize)
+	treeStart := v.diskOffset(int64(v.header.CatalogFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
 	state := catalogWalkState{
 		vol:      v,
 		header:   hdr,
@@ -184,7 +192,54 @@ func (v *Volume) walkCatalogLeafChain(cb catalogLeafCallback) error {
 		}
 
 		for _, rec := range extractNodeRecords(node, desc) {
-			key, consumed, err := parseCatalogKey(rec)
+			key, consumed, err := parseCatalogKeyForKind(v.kind, rec)
+			if err != nil {
+				continue
+			}
+			if consumed > len(rec) {
+				continue
+			}
+			if err := cb(key, rec[consumed:]); err != nil {
+				return err
+			}
+		}
+
+		nodeNum = desc.ForwardLink
+	}
+	return nil
+}
+
+func (v *Volume) walkExtentsLeafChain(cb extentsLeafCallback) error {
+	hdr, err := v.ExtentsBTreeHeader()
+	if err != nil {
+		return err
+	}
+	if hdr.NodeSize == 0 {
+		return &ParseError{Op: "walk_extents_leaf_chain", Offset: 0, Err: ErrInvalidBTreeNode}
+	}
+
+	treeStart := v.diskOffset(int64(v.header.ExtentsFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
+	state := extentsWalkState{
+		vol:      v,
+		header:   hdr,
+		treeBase: treeStart,
+		visited:  make(map[uint32]struct{}),
+	}
+
+	nodeNum := hdr.FirstLeafNode
+	for nodeNum != 0 {
+		if _, ok := state.visited[nodeNum]; ok {
+			break
+		}
+		state.visited[nodeNum] = struct{}{}
+
+		node, desc, err := state.readNode(nodeNum)
+		if err != nil {
+			return err
+		}
+
+		for _, rec := range extractNodeRecords(node, desc) {
+			key, consumed, err := parseExtentsKeyForKind(v.kind, rec)
 			if err != nil {
 				continue
 			}

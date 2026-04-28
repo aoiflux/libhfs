@@ -79,7 +79,7 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 			can = need
 		}
 
-		physOff := int64(ext.StartBlock)*blockSize + inExt
+		physOff := f.vol.diskOffset(int64(ext.StartBlock)*blockSize + inExt)
 		chunk := p[wrote : wrote+int(can)]
 		if err := readAtExact(f.vol.reader, physOff, chunk); err != nil {
 			return wrote, err

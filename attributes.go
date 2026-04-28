@@ -59,7 +59,7 @@ func parseAttributesKey(raw []byte) (attributesKey, int, error) {
 	}, total, nil
 }
 
-func readFromExtents(r io.ReaderAt, exts []ExtentDescriptor, blockSize uint32, off int64, dst []byte) error {
+func readFromExtents(r io.ReaderAt, exts []ExtentDescriptor, blockSize uint32, baseOffset int64, off int64, dst []byte) error {
 	if off < 0 {
 		return &ParseError{Op: "read_from_extents", Offset: off, Err: ErrInvalidOffset}
 	}
@@ -88,7 +88,7 @@ func readFromExtents(r io.ReaderAt, exts []ExtentDescriptor, blockSize uint32, o
 		if can > int64(remain-wrote) {
 			can = int64(remain - wrote)
 		}
-		physOff := int64(ext.StartBlock)*bSize + inExt
+		physOff := baseOffset + int64(ext.StartBlock)*bSize + inExt
 		chunk := dst[wrote : wrote+int(can)]
 		if err := readAtExact(r, physOff, chunk); err != nil {
 			return err
@@ -127,7 +127,7 @@ func (v *Volume) walkAttributesLeafChain(cb func(key attributesKey, payload []by
 		visited[nodeNum] = struct{}{}
 
 		node := make([]byte, hdr.NodeSize)
-		if err := readFromExtents(v.reader, exts, v.header.BlockSize, int64(nodeNum)*int64(hdr.NodeSize), node); err != nil {
+		if err := readFromExtents(v.reader, exts, v.header.BlockSize, v.baseOffset, int64(nodeNum)*int64(hdr.NodeSize), node); err != nil {
 			return err
 		}
 		desc, err := parseBTreeNodeDescriptor(node)

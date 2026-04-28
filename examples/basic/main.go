@@ -78,7 +78,7 @@ func listRootDir(vol *hfs.Volume) {
 	for _, e := range entries {
 		kind := "FILE"
 		if e.IsDirectory {
-			kind = "DIR "
+			kind = "DIR"
 		}
 		fmt.Printf("[%s] %s  (CNID %d)\n", kind, e.Name, e.CNID)
 	}

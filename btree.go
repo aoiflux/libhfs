@@ -77,6 +77,39 @@ func parseCatalogKey(raw []byte) (CatalogKey, int, error) {
 	}, total, nil
 }
 
+func parseCatalogKeyHFS(raw []byte) (CatalogKey, int, error) {
+	if len(raw) < 7 {
+		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	keyLen := int(raw[0])
+	total := keyLen + 1
+	if total > len(raw) || total < 7 {
+		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	body := raw[1:total]
+	parent := be32(body[1:5])
+	nameLen := int(body[5])
+	if nameLen < 0 || nameLen > 31 || 6+nameLen > len(body) {
+		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	name := make([]uint16, 0, nameLen)
+	for _, b := range body[6 : 6+nameLen] {
+		name = append(name, uint16(b))
+	}
+
+	if total%2 != 0 {
+		total++
+	}
+	if total > len(raw) {
+		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	return CatalogKey{KeyLength: uint16(keyLen), ParentCNID: parent, NameUTF16: name}, total, nil
+}
+
 func parseExtentsKey(raw []byte) (ExtentsKey, int, error) {
 	if len(raw) < 12 {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key", Offset: 0, Err: ErrInvalidBTreeKey}
@@ -99,6 +132,52 @@ func parseExtentsKey(raw []byte) (ExtentsKey, int, error) {
 		FileID:     be32(raw[4:8]),
 		StartBlock: be32(raw[8:12]),
 	}, total, nil
+}
+
+func parseExtentsKeyHFS(raw []byte) (ExtentsKey, int, error) {
+	if len(raw) < 8 {
+		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	keyLen := int(raw[0])
+	total := keyLen + 1
+	if total > len(raw) || total < 8 {
+		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	body := raw[1:total]
+	forkType := body[0]
+	if forkType != extentKeyTypeData && forkType != extentKeyTypeRsrc {
+		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	if total%2 != 0 {
+		total++
+	}
+	if total > len(raw) {
+		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
+	}
+
+	return ExtentsKey{
+		KeyLength:  uint16(keyLen),
+		ForkType:   forkType,
+		FileID:     be32(body[1:5]),
+		StartBlock: uint32(be16(body[5:7])),
+	}, total, nil
+}
+
+func parseCatalogKeyForKind(kind FileSystemKind, raw []byte) (CatalogKey, int, error) {
+	if kind == KindHFS {
+		return parseCatalogKeyHFS(raw)
+	}
+	return parseCatalogKey(raw)
+}
+
+func parseExtentsKeyForKind(kind FileSystemKind, raw []byte) (ExtentsKey, int, error) {
+	if kind == KindHFS {
+		return parseExtentsKeyHFS(raw)
+	}
+	return parseExtentsKey(raw)
 }
 
 func parseNodeRecordOffsets(node []byte, numRecords uint16) ([]uint16, error) {

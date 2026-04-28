@@ -8,6 +8,7 @@ import (
 var (
 	ErrInvalidSignature  = errors.New("hfs: invalid volume signature")
 	ErrUnsupportedFormat = errors.New("hfs: unsupported filesystem format")
+	ErrUnsupportedHFS    = errors.New("hfs: classic HFS volume is not supported")
 	ErrUnsupportedVer    = errors.New("hfs: unsupported volume version")
 	ErrCorrupt           = errors.New("hfs: corrupt volume metadata")
 	ErrShortRead         = errors.New("hfs: short read")

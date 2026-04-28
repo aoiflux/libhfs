@@ -71,6 +71,81 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 	}
 }
 
+func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (CatalogRecord, error) {
+	if len(payload) < 1 {
+		return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
+	}
+
+	rec := CatalogRecord{ParentCNID: key.ParentCNID, Name: key.NameString()}
+
+	switch payload[0] {
+	case 0x01: // folder
+		rec.Type = CatalogRecordFolder
+		if len(payload) < 14 {
+			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
+		}
+		rec.CNID = be32(payload[6:10])
+		rec.Valence = uint32(be16(payload[10:12]))
+		return rec, nil
+	case 0x02: // file
+		rec.Type = CatalogRecordFile
+		if len(payload) < 98 {
+			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
+		}
+		rec.CNID = be32(payload[20:24])
+		dataLogical := uint32(be32(payload[26:30]))
+		dataPhysical := uint32(be32(payload[30:34]))
+		rec.DataFork.LogicalSize = uint64(dataLogical)
+		if blockSize != 0 {
+			rec.DataFork.TotalBlocks = uint32((uint64(dataPhysical) + uint64(blockSize) - 1) / uint64(blockSize))
+		}
+		dataExtents, err := parseExtentsRecordHFS(payload[74:86])
+		if err != nil {
+			return CatalogRecord{}, err
+		}
+		copy(rec.DataFork.Extents[:], dataExtents)
+
+		rsrcLogical := uint32(be32(payload[36:40]))
+		rsrcPhysical := uint32(be32(payload[40:44]))
+		rec.RsrcFork.LogicalSize = uint64(rsrcLogical)
+		if blockSize != 0 {
+			rec.RsrcFork.TotalBlocks = uint32((uint64(rsrcPhysical) + uint64(blockSize) - 1) / uint64(blockSize))
+		}
+		rsrcExtents, err := parseExtentsRecordHFS(payload[86:98])
+		if err != nil {
+			return CatalogRecord{}, err
+		}
+		copy(rec.RsrcFork.Extents[:], rsrcExtents)
+		return rec, nil
+	case 0x03, 0x04: // folder/file thread
+		if payload[0] == 0x03 {
+			rec.Type = CatalogRecordFolderThread
+		} else {
+			rec.Type = CatalogRecordFileThread
+		}
+		if len(payload) < 7 {
+			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
+		}
+		rec.ThreadCNID = key.ParentCNID
+		rec.ParentCNID = be32(payload[2:6])
+		nameLen := int(payload[6])
+		if 7+nameLen > len(payload) {
+			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
+		}
+		rec.Name = string(payload[7 : 7+nameLen])
+		return rec, nil
+	default:
+		return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
+	}
+}
+
+func (v *Volume) decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) {
+	if v != nil && v.kind == KindHFS {
+		return decodeCatalogRecordHFS(key, payload, v.header.BlockSize)
+	}
+	return decodeCatalogRecord(key, payload)
+}
+
 func (r CatalogRecord) hardLinkTargetCNID() uint32 {
 	if r.Type != CatalogRecordFile {
 		return 0
@@ -102,7 +177,7 @@ func (v *Volume) WalkCatalog(cb func(CatalogRecord) error) error {
 	}
 	// Use the leaf-chain path for sequential full scans: faster than tree recursion.
 	err := v.walkCatalogLeafChain(func(key CatalogKey, payload []byte) error {
-		r, err := decodeCatalogRecord(key, payload)
+		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
 		}
@@ -129,13 +204,13 @@ func (v *Volume) lookupCNIDRaw(cnid uint32) (CatalogRecord, error) {
 	var lastCandidateFound bool
 
 	err := v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
-		r, err := decodeCatalogRecord(key, payload)
+		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
 		}
 		if r.CNID == cnid {
 			// Skip empty file records that appear to be placeholders (but not hard-links)
-			if r.Type == CatalogRecordFile && r.DataFork.LogicalSize == 0 && r.DataFork.TotalBlocks == 0 {
+			if v.kind != KindHFS && r.Type == CatalogRecordFile && r.DataFork.LogicalSize == 0 && r.DataFork.TotalBlocks == 0 {
 				// This might be a placeholder; keep looking for a non-empty record with the same CNID
 				if !lastCandidateFound {
 					lastCandidate = r
@@ -234,7 +309,7 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 	var lastCandidateFound bool
 
 	err := v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
-		r, err := decodeCatalogRecord(key, payload)
+		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
 		}
@@ -243,7 +318,7 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 		}
 		if cmp(r.Name, name) {
 			// Skip empty file records that appear to be placeholders
-			if r.Type == CatalogRecordFile && r.DataFork.LogicalSize == 0 && r.DataFork.TotalBlocks == 0 {
+			if v.kind != KindHFS && r.Type == CatalogRecordFile && r.DataFork.LogicalSize == 0 && r.DataFork.TotalBlocks == 0 {
 				// This might be a placeholder; keep looking for a non-empty record with the same name
 				if !lastCandidateFound {
 					lastCandidate = r
@@ -271,6 +346,12 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 }
 
 func (v *Volume) catalogNameComparer() (func(a, b string) bool, error) {
+	if v.kind == KindHFS {
+		return func(a, b string) bool {
+			return strings.EqualFold(a, b)
+		}, nil
+	}
+
 	h, err := v.CatalogBTreeHeader()
 	if err != nil {
 		return nil, err
@@ -343,7 +424,7 @@ func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 	}
 
 	err = v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
-		r, err := decodeCatalogRecord(key, payload)
+		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
 		}
@@ -434,7 +515,7 @@ func (v *Volume) findThreadRecord(targetCNID uint32) (CatalogRecord, error) {
 	var out CatalogRecord
 	found := false
 	err := v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
-		r, err := decodeCatalogRecord(key, payload)
+		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
 		}

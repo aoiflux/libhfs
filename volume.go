@@ -16,12 +16,122 @@ func Open(r io.ReaderAt) (*Volume, error) {
 		return nil, err
 	}
 
+	baseOffset := int64(0)
+	if be16(buf[0:2]) == signatureHFS {
+		embeddedOffset, ok := parseHFSWrapperEmbeddedOffset(buf)
+		if !ok {
+			hdr, hfsBase, err := parseHFSMasterDirectoryBlock(buf)
+			if err != nil {
+				return nil, err
+			}
+			return &Volume{reader: r, kind: KindHFS, header: hdr, baseOffset: hfsBase}, nil
+		}
+		if err := readAtExact(r, embeddedOffset+volumeHeaderOffset, buf); err != nil {
+			return nil, err
+		}
+		baseOffset = embeddedOffset
+	}
+
 	hdr, kind, err := parseVolumeHeader(buf)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Volume{reader: r, kind: kind, header: hdr}, nil
+	return &Volume{reader: r, kind: kind, header: hdr, baseOffset: baseOffset}, nil
+}
+
+func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
+	if len(mdb) < volumeHeaderSize {
+		return 0, false
+	}
+	if be16(mdb[0:2]) != signatureHFS {
+		return 0, false
+	}
+	if be16(mdb[hfsMDBOffEmbedSigWord:hfsMDBOffEmbedSigWord+2]) != signatureHFSP {
+		return 0, false
+	}
+
+	allocBlockSize := be32(mdb[hfsMDBOffBlockSize : hfsMDBOffBlockSize+4])
+	allocBlockStart512 := be16(mdb[28:30])
+	embedStartBlock := be16(mdb[hfsMDBOffEmbedExtent : hfsMDBOffEmbedExtent+2])
+	embedBlockCount := be16(mdb[hfsMDBOffEmbedExtent+2 : hfsMDBOffEmbedExtent+4])
+
+	if allocBlockSize == 0 || embedBlockCount == 0 {
+		return 0, false
+	}
+
+	return int64(allocBlockStart512)*512 + int64(embedStartBlock)*int64(allocBlockSize), true
+}
+
+func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, error) {
+	if len(mdb) < volumeHeaderSize {
+		return VolumeHeader{}, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrShortRead}
+	}
+	if be16(mdb[0:2]) != signatureHFS {
+		return VolumeHeader{}, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrInvalidSignature}
+	}
+
+	blockSize := be32(mdb[hfsMDBOffBlockSize : hfsMDBOffBlockSize+4])
+	totalBlocks := uint32(be16(mdb[hfsMDBOffTotalBlocks : hfsMDBOffTotalBlocks+2]))
+	if blockSize == 0 || totalBlocks == 0 {
+		return VolumeHeader{}, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrCorrupt}
+	}
+
+	allocBlockStart512 := be16(mdb[28:30])
+	dataBase := int64(allocBlockStart512) * 512
+
+	hdr := VolumeHeader{
+		Signature:      signatureHFS,
+		Version:        0,
+		Attributes:     uint32(be16(mdb[hfsMDBOffAttributes : hfsMDBOffAttributes+2])),
+		CreateTime:     hfsTimeToUnix(be32(mdb[hfsMDBOffCreateTime : hfsMDBOffCreateTime+4])),
+		ModifyTime:     hfsTimeToUnix(be32(mdb[hfsMDBOffModifyTime : hfsMDBOffModifyTime+4])),
+		BackupTime:     hfsTimeToUnix(be32(mdb[hfsMDBOffBackupTime : hfsMDBOffBackupTime+4])),
+		FileCount:      uint32(be16(mdb[hfsMDBOffFileCount : hfsMDBOffFileCount+2])),
+		FolderCount:    uint32(be16(mdb[hfsMDBOffFolderCount : hfsMDBOffFolderCount+2])),
+		BlockSize:      blockSize,
+		TotalBlocks:    totalBlocks,
+		FreeBlocks:     uint32(be16(mdb[hfsMDBOffFreeBlocks : hfsMDBOffFreeBlocks+2])),
+		NextAllocation: uint32(be16(mdb[hfsMDBOffAllocPtr : hfsMDBOffAllocPtr+2])),
+		NextCatalogID:  be32(mdb[hfsMDBOffNextCatalogID : hfsMDBOffNextCatalogID+4]),
+		WriteCount:     uint32(be16(mdb[hfsMDBOffWriteCount : hfsMDBOffWriteCount+2])),
+	}
+
+	for i := 0; i < 8; i++ {
+		off := hfsMDBOffFinderInfo + i*4
+		hdr.FinderInfo[i] = be32(mdb[off : off+4])
+	}
+
+	hdr.ExtentsFile = parseHFSForkData(be32(mdb[hfsMDBOffXTFlSize:hfsMDBOffXTFlSize+4]), mdb[hfsMDBOffXTExtRec:hfsMDBOffXTExtRec+12], blockSize)
+	hdr.CatalogFile = parseHFSForkData(be32(mdb[hfsMDBOffCTFlSize:hfsMDBOffCTFlSize+4]), mdb[hfsMDBOffCTExtRec:hfsMDBOffCTExtRec+12], blockSize)
+
+	return hdr, dataBase, nil
+}
+
+func parseHFSForkData(logicalSize uint32, extRec []byte, blockSize uint32) ForkData {
+	fd := ForkData{LogicalSize: uint64(logicalSize)}
+	if blockSize == 0 {
+		return fd
+	}
+	fd.TotalBlocks = uint32((uint64(logicalSize) + uint64(blockSize) - 1) / uint64(blockSize))
+	for i := 0; i < 3; i++ {
+		base := i * 4
+		if base+4 > len(extRec) {
+			break
+		}
+		fd.Extents[i] = ExtentDescriptor{
+			StartBlock: uint32(be16(extRec[base : base+2])),
+			BlockCount: uint32(be16(extRec[base+2 : base+4])),
+		}
+	}
+	return fd
+}
+
+func (v *Volume) diskOffset(rel int64) int64 {
+	if v == nil {
+		return rel
+	}
+	return v.baseOffset + rel
 }
 
 func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
@@ -159,7 +269,7 @@ func (v *Volume) readForkBTreeHeader(f ForkData, op string) (BTreeHeaderRecord, 
 		return BTreeHeaderRecord{}, &ParseError{Op: op + "_btree_header", Offset: 0, Err: ErrMissingExtent}
 	}
 
-	treeStart := int64(f.Extents[0].StartBlock) * int64(v.header.BlockSize)
+	treeStart := v.diskOffset(int64(f.Extents[0].StartBlock) * int64(v.header.BlockSize))
 	buf := make([]byte, btreeNodeDescSize+btreeHeaderRecSize)
 	if err := readAtExact(v.reader, treeStart, buf); err != nil {
 		return BTreeHeaderRecord{}, err
