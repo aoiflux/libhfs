@@ -82,14 +82,20 @@ Implemented:
 - Inline `com.apple.decmpfs` decompression support (raw + zlib inline payloads)
 - Typed error model using standard Go wrapping (`errors.Is` / `errors.As`)
 
+- Keyed B-tree descent for catalog, extents and attributes lookups
+- Safe for concurrent readers, with bounded record and B-tree node caches
+- Structural anomaly reporting for damaged volumes
+
 Current limitations:
 
 - Read-only library (no write or repair operations)
 - Compression support is limited to inline decmpfs attribute payloads
 - Extended attributes are parsed only for decmpfs; no general listing API yet
 - No deleted-record recovery yet
-- Lookups scan the catalog B-tree linearly rather than descending by key,
-  which is slow on large images
+- Classic HFS lookups still scan the catalog linearly, pending MacRoman
+  collation support
+- B-tree node addressing assumes the catalog and extents files are
+  unfragmented
 - Classic HFS carries no extended attributes, access dates, attribute
   modification dates, hard links or compression — these are properties of the
   format, not gaps in the parser
@@ -147,6 +153,10 @@ Volume-level:
 - `(*Volume).PathForCNID(cnid uint32) (string, error)`
 - `(*Volume).GetTimes(cnid uint32) (CatalogTimes, error)`
 - `(*Volume).GetTimesByPath(path string) (CatalogTimes, error)`
+- `(*Volume).SetCacheSize(n int)`
+- `(*Volume).SetNodeCacheSize(n int)`
+- `(*Volume).Anomalies() []Anomaly`
+- `(*Volume).AnomalyCount() int`
 
 File-level:
 
@@ -157,6 +167,53 @@ File-level:
 - `(*File).Read(p []byte) (int, error)`
 - `(*File).ReadAt(p []byte, off int64) (int, error)`
 - `(*File).ReadAll() ([]byte, error)`
+
+## Concurrency
+
+A `*Volume` is safe for concurrent use by multiple goroutines. This assumes the
+`io.ReaderAt` it was opened with honours the standard contract that parallel
+`ReadAt` calls are permitted — `*os.File`, `*bytes.Reader` and
+`*io.SectionReader` all do.
+
+A `*File` is **not** safe for concurrent use, because `Read` advances a
+per-handle offset. Give each goroutine its own handle, or use `ReadAt`, which
+does not touch that offset.
+
+## Caching
+
+Lookups descend the B-tree by key rather than scanning it, and two bounded
+caches sit behind that. Both are on by default and both are safe to leave alone.
+
+- `SetCacheSize(n)` — catalog records, default `DefaultCacheSize` (4096).
+- `SetNodeCacheSize(n)` — B-tree nodes, default `DefaultNodeCacheSize` (128).
+
+Pass 0 to either to disable it. Since the volume is read-only, cached data
+cannot go stale.
+
+## Damaged Volumes
+
+Keyed descent needs a structurally sound B-tree. When it encounters one that is
+not — an unreadable node, an unparseable key, or index keys that disagree with
+the leaves they index — it falls back to a full linear walk rather than
+returning a wrong or incomplete answer, and records the inconsistency:
+
+```go
+entries, err := vol.ReadDir("/")
+if err != nil {
+	log.Fatal(err)
+}
+
+if vol.AnomalyCount() > 0 {
+	for _, a := range vol.Anomalies() {
+		fmt.Printf("anomaly: %s at %d: %s\n", a.Op, a.Offset, a.Detail)
+	}
+}
+```
+
+A non-zero `AnomalyCount` is a finding about the volume, not merely a
+performance note: it means part of the filesystem metadata is inconsistent.
+Results remain correct, because the fallback path is the same exhaustive walk
+earlier versions always used.
 
 ## Error Handling
 

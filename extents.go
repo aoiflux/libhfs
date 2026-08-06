@@ -129,10 +129,7 @@ func (v *Volume) resolveForkExtentsFromFork(cnid uint32, fork ForkData, forkType
 	}
 
 	overflow := make(map[uint32][]ExtentDescriptor)
-	err := v.walkExtentsBTree(func(key ExtentsKey, payload []byte) error {
-		if key.FileID != cnid || key.ForkType != forkType {
-			return nil
-		}
+	err := v.walkExtentsForFork(cnid, forkType, func(key ExtentsKey, payload []byte) error {
 		extents, err := v.parseExtentsRecordByKind(payload)
 		if err != nil {
 			return nil

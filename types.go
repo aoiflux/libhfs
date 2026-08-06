@@ -1,6 +1,9 @@
 package hfs
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 type FileSystemKind string
 
@@ -51,6 +54,16 @@ type VolumeHeader struct {
 	StartupFile        ForkData
 }
 
+// Volume is an open, read-only HFS, HFS+ or HFSX filesystem.
+//
+// A *Volume is safe for concurrent use by multiple goroutines. This requires
+// that the io.ReaderAt it was opened with honours the standard contract that
+// parallel ReadAt calls are permitted — *os.File, *bytes.Reader and
+// *io.SectionReader all do.
+//
+// A *File returned by the Open*By* methods is NOT safe for concurrent use,
+// because Read advances a per-handle offset. Give each goroutine its own
+// handle, or use ReadAt, which does not touch that offset.
 type Volume struct {
 	reader ioReaderAt
 	kind   FileSystemKind
@@ -58,6 +71,18 @@ type Volume struct {
 	// baseOffset is the byte offset where the parsed HFS+ volume starts on disk.
 	// It is zero for non-wrapper volumes.
 	baseOffset int64
+
+	// mu guards every field below it. The fields above are written once during
+	// Open and read-only thereafter, so they need no locking.
+	mu           sync.RWMutex
+	recCache     map[uint32]CatalogRecord
+	recOrder     []uint32
+	cacheMax     int
+	nodeCache    map[nodeCacheKey][]byte
+	nodeOrder    []nodeCacheKey
+	nodeCacheMax int
+	anomalies    []Anomaly
+	anomalyTotal int
 }
 
 type BTreeNodeDescriptor struct {

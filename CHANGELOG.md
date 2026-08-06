@@ -4,6 +4,51 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Roadmap and phase
 planning live in [PLAN.md](PLAN.md).
 
+## [Unreleased]
+
+Phase 1: keyed B-tree search. No breaking API changes — lookups that previously
+scanned the whole catalog now descend by key, with a linear fallback whenever
+the tree structure does not permit descent.
+
+### Added
+
+- `*Volume` is now safe for concurrent use by multiple goroutines. This requires
+  the supplied `io.ReaderAt` to honour the standard contract allowing parallel
+  `ReadAt` calls. A single `*File` remains unsafe for concurrent use because
+  `Read` advances a per-handle offset; `ReadAt` is safe.
+- Catalog record cache, bounded by `SetCacheSize` (default `DefaultCacheSize`,
+  4096 records; 0 disables).
+- B-tree node cache, bounded by `SetNodeCacheSize` (default
+  `DefaultNodeCacheSize`, 128 nodes; 0 disables).
+- `Anomaly`, `(*Volume).Anomalies()` and `(*Volume).AnomalyCount()` report
+  structural inconsistencies encountered during parsing that did not stop the
+  operation — currently, any search that had to fall back to a linear walk.
+  Anomalies are deduplicated on `(Op, Detail)`; the count includes repeats.
+
+### Changed
+
+- `OpenPath`, `OpenCNID`, `ReadDir`, `WalkDir`, `PathForCNID`, fork extent
+  resolution and decmpfs attribute lookup all descend the relevant B-tree by key
+  instead of scanning it end to end. On the test fixture a deepest-path
+  `OpenPath` went from 114,808 bytes read to 600 with default settings.
+- CNID lookup now resolves through the record's thread record rather than
+  scanning for a matching CNID.
+
+### Notes
+
+- Classic HFS still uses the linear walk for lookups: its catalog keys collate
+  under a MacRoman ordering this package does not model yet. Both caches still
+  apply. Keyed search for classic HFS arrives with the MacRoman work.
+- Descent validates that it landed where a well-formed tree says it should. A
+  B-tree whose index keys disagree with its leaves would otherwise cause
+  searches to silently under-report; instead such a volume falls back to the
+  linear walk and records an anomaly.
+- Name collation is deliberately not reproduced. Every descent target uses an
+  empty name, which sorts first under any comparator, so descent depends only on
+  the parent CNID; name matching is done by scanning the parent's child run.
+  This removes any possibility of a comparator mismatch hiding a file that is
+  present.
+
 ## [0.2.0] — 2026-08-06
 
 Phase 0: per-file MACB timestamps.

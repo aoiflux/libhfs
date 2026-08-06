@@ -244,6 +244,88 @@ func (v *Volume) OpenCNID(cnid uint32) (CatalogRecord, error) {
 }
 
 func (v *Volume) lookupCNIDRaw(cnid uint32) (CatalogRecord, error) {
+	if rec, ok := v.cacheLookup(cnid); ok {
+		return rec, nil
+	}
+
+	// Preferred path: resolve the thread record to learn the parent, then scan
+	// only that parent's children. Two keyed descents instead of a full scan.
+	if v.supportsKeyedSearch() {
+		if rec, err := v.lookupCNIDViaThread(cnid); err == nil {
+			v.cacheStore(cnid, rec)
+			return rec, nil
+		}
+	}
+
+	rec, err := v.lookupCNIDLinear(cnid)
+	if err != nil {
+		return CatalogRecord{}, err
+	}
+	v.cacheStore(cnid, rec)
+	return rec, nil
+}
+
+// lookupCNIDViaThread resolves a CNID through its thread record. Volumes
+// written by macOS always carry thread records for both files and folders;
+// when one is missing or damaged the caller falls back to a linear scan.
+func (v *Volume) lookupCNIDViaThread(cnid uint32) (CatalogRecord, error) {
+	thr, err := v.findThreadRecord(cnid)
+	if err != nil {
+		return CatalogRecord{}, err
+	}
+
+	var out CatalogRecord
+	var found bool
+	var lastCandidate CatalogRecord
+	var lastCandidateFound bool
+
+	err = v.walkCatalogChildren(thr.ParentCNID, func(key CatalogKey, payload []byte) error {
+		r, err := v.decodeCatalogRecord(key, payload)
+		if err != nil {
+			return nil
+		}
+		if r.CNID != cnid {
+			return nil
+		}
+		if r.Type != CatalogRecordFolder && r.Type != CatalogRecordFile {
+			return nil
+		}
+		if v.isPlaceholderRecord(r) {
+			if !lastCandidateFound {
+				lastCandidate, lastCandidateFound = r, true
+			}
+			return nil
+		}
+		out = r
+		found = true
+		return errStopWalk
+	})
+	if err != nil && !errors.Is(err, errStopWalk) {
+		return CatalogRecord{}, err
+	}
+	if found {
+		return out, nil
+	}
+	if lastCandidateFound {
+		return lastCandidate, nil
+	}
+	return CatalogRecord{}, ErrNotFound
+}
+
+// isPlaceholderRecord reports whether a file record looks like an empty
+// placeholder that a real record with the same identity should win over.
+//
+// This heuristic predates keyed search and is preserved unchanged so this
+// phase stays behaviour-neutral. PLAN.md §0.3 B5 tracks re-deriving it from
+// B-tree key order instead of from record contents.
+func (v *Volume) isPlaceholderRecord(r CatalogRecord) bool {
+	return v.kind != KindHFS &&
+		r.Type == CatalogRecordFile &&
+		r.DataFork.LogicalSize == 0 &&
+		r.DataFork.TotalBlocks == 0
+}
+
+func (v *Volume) lookupCNIDLinear(cnid uint32) (CatalogRecord, error) {
 	var out CatalogRecord
 	var found bool
 	var lastCandidate CatalogRecord
@@ -380,7 +462,10 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 	var lastCandidate CatalogRecord
 	var lastCandidateFound bool
 
-	err := v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
+	// Scans only this parent's run of children rather than the whole catalog.
+	// Names are matched with cmp instead of by keyed lookup, so the volume's
+	// collation never has to be reproduced here — see compareCatalogKeys.
+	err := v.walkCatalogChildren(parent, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
@@ -495,7 +580,7 @@ func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 		return nil
 	}
 
-	err = v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
+	err = v.walkCatalogChildren(cnid, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil
@@ -586,7 +671,9 @@ func (v *Volume) PathForCNID(cnid uint32) (string, error) {
 func (v *Volume) findThreadRecord(targetCNID uint32) (CatalogRecord, error) {
 	var out CatalogRecord
 	found := false
-	err := v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
+	// A thread record is keyed on (ownCNID, ""), so it sits at the head of the
+	// run of records whose key parent is the target CNID.
+	err := v.walkCatalogChildren(targetCNID, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			return nil

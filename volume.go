@@ -24,7 +24,14 @@ func Open(r io.ReaderAt) (*Volume, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &Volume{reader: r, kind: KindHFS, header: hdr, baseOffset: hfsBase}, nil
+			return &Volume{
+				reader:       r,
+				kind:         KindHFS,
+				header:       hdr,
+				baseOffset:   hfsBase,
+				cacheMax:     DefaultCacheSize,
+				nodeCacheMax: DefaultNodeCacheSize,
+			}, nil
 		}
 		if err := readAtExact(r, embeddedOffset+volumeHeaderOffset, buf); err != nil {
 			return nil, err
@@ -37,7 +44,14 @@ func Open(r io.ReaderAt) (*Volume, error) {
 		return nil, err
 	}
 
-	return &Volume{reader: r, kind: kind, header: hdr, baseOffset: baseOffset}, nil
+	return &Volume{
+		reader:       r,
+		kind:         kind,
+		header:       hdr,
+		baseOffset:   baseOffset,
+		cacheMax:     DefaultCacheSize,
+		nodeCacheMax: DefaultNodeCacheSize,
+	}, nil
 }
 
 func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {

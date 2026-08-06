@@ -160,8 +160,8 @@ func (v *Volume) readDecmpfsInline(cnid uint32) ([]byte, uint64, bool, error) {
 	var data []byte
 	var uncSize uint64
 	found := false
-	err := v.walkAttributesLeafChain(func(key attributesKey, payload []byte) error {
-		if key.FileID != cnid || key.StartBlock != 0 || key.Name != decmpfsAttrName {
+	err := v.walkAttributesForFile(cnid, func(key attributesKey, payload []byte) error {
+		if key.StartBlock != 0 || key.Name != decmpfsAttrName {
 			return nil
 		}
 		if len(payload) < 16 {
