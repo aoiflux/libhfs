@@ -9,6 +9,46 @@ import (
 
 var errStopWalk = errors.New("hfs: stop walk")
 
+// decodeCatalogTimesHFSPlus reads the five HFS+ catalog dates. Both
+// HFSPlusCatalogFolder and HFSPlusCatalogFile place them at the same offsets,
+// so one decoder serves both. The caller must have already checked that
+// payload is at least 88 bytes.
+func decodeCatalogTimesHFSPlus(payload []byte) CatalogTimes {
+	return CatalogTimes{
+		Created:         hfsCatalogTime(be32(payload[12:16])),
+		ContentModified: hfsCatalogTime(be32(payload[16:20])),
+		AttrModified:    hfsCatalogTime(be32(payload[20:24])),
+		Accessed:        hfsCatalogTime(be32(payload[24:28])),
+		Backup:          hfsCatalogTime(be32(payload[28:32])),
+		Source:          TimeSourceHFSPlusGMT,
+	}
+}
+
+// decodeCatalogTimesHFSFile reads the three dates in a classic HFS CatFilRec:
+// filCrDat, filMdDat and filBkDat. Classic HFS records no access or
+// attribute-modification date. The caller must have already checked that
+// payload is at least 56 bytes.
+func decodeCatalogTimesHFSFile(payload []byte) CatalogTimes {
+	return CatalogTimes{
+		Created:         hfsCatalogTime(be32(payload[44:48])),
+		ContentModified: hfsCatalogTime(be32(payload[48:52])),
+		Backup:          hfsCatalogTime(be32(payload[52:56])),
+		Source:          TimeSourceHFSLocal,
+	}
+}
+
+// decodeCatalogTimesHFSDir reads the three dates in a classic HFS CatDirRec:
+// dirCrDat, dirMdDat and dirBkDat. The caller must have already checked that
+// payload is at least 22 bytes.
+func decodeCatalogTimesHFSDir(payload []byte) CatalogTimes {
+	return CatalogTimes{
+		Created:         hfsCatalogTime(be32(payload[10:14])),
+		ContentModified: hfsCatalogTime(be32(payload[14:18])),
+		Backup:          hfsCatalogTime(be32(payload[18:22])),
+		Source:          TimeSourceHFSLocal,
+	}
+}
+
 func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) {
 	if len(payload) < 2 {
 		return CatalogRecord{}, &ParseError{Op: "decode_catalog_record", Offset: 0, Err: ErrCorrupt}
@@ -28,6 +68,7 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 		}
 		rec.Valence = be32(payload[4:8])
 		rec.CNID = be32(payload[8:12])
+		rec.Times = decodeCatalogTimesHFSPlus(payload)
 		rec.LinkID = be32(payload[44:48])
 		rec.FinderType = be32(payload[48:52])
 		rec.FinderCreator = be32(payload[52:56])
@@ -37,6 +78,7 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record", Offset: 0, Err: ErrCorrupt}
 		}
 		rec.CNID = be32(payload[8:12])
+		rec.Times = decodeCatalogTimesHFSPlus(payload)
 		rec.LinkID = be32(payload[44:48])
 		rec.FinderType = be32(payload[48:52])
 		rec.FinderCreator = be32(payload[52:56])
@@ -81,11 +123,14 @@ func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (C
 	switch payload[0] {
 	case 0x01: // folder
 		rec.Type = CatalogRecordFolder
-		if len(payload) < 14 {
+		// 22 bytes covers CatDirRec through dirBkDat.
+		if len(payload) < 22 {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
+		// dirVal is at offset 4 and dirDirID at 6; offset 10 is dirCrDat.
+		rec.Valence = uint32(be16(payload[4:6]))
 		rec.CNID = be32(payload[6:10])
-		rec.Valence = uint32(be16(payload[10:12]))
+		rec.Times = decodeCatalogTimesHFSDir(payload)
 		return rec, nil
 	case 0x02: // file
 		rec.Type = CatalogRecordFile
@@ -93,6 +138,7 @@ func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (C
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
 		rec.CNID = be32(payload[20:24])
+		rec.Times = decodeCatalogTimesHFSFile(payload)
 		dataLogical := uint32(be32(payload[26:30]))
 		dataPhysical := uint32(be32(payload[30:34]))
 		rec.DataFork.LogicalSize = uint64(dataLogical)
@@ -267,6 +313,32 @@ func (v *Volume) hydrateCatalogRecord(rec CatalogRecord) (CatalogRecord, error) 
 		return CatalogRecord{}, err
 	}
 	return v.hydrateCompressedRecord(resolved), nil
+}
+
+// GetTimes returns the MACB timestamp set for a catalog node.
+//
+// Check CatalogTimes.Source before comparing values across volumes, and test
+// individual fields with IsZero: a zero time means the field was unset on
+// disk, not that the event happened at the epoch.
+//
+// For a hard link this reports the target inode's timestamps, matching the
+// resolution OpenCNID performs.
+func (v *Volume) GetTimes(cnid uint32) (CatalogTimes, error) {
+	rec, err := v.OpenCNID(cnid)
+	if err != nil {
+		return CatalogTimes{}, err
+	}
+	return rec.Times, nil
+}
+
+// GetTimesByPath returns the MACB timestamp set for a path. See GetTimes for
+// the caveats that apply to the returned values.
+func (v *Volume) GetTimesByPath(path string) (CatalogTimes, error) {
+	rec, err := v.OpenPath(path)
+	if err != nil {
+		return CatalogTimes{}, err
+	}
+	return rec.Times, nil
 }
 
 func (v *Volume) GetRootDirectory() (CatalogRecord, error) {

@@ -1,8 +1,8 @@
 # libhfs
 
-libhfs reads HFS+ and HFSX volumes and disk images with strong validation, typed
-errors, and an API designed for tooling, forensics workflows, and systems
-integration.
+libhfs reads HFS+, HFSX and classic HFS volumes and disk images with strong
+validation, typed errors, and an API designed for tooling, forensics workflows,
+and systems integration.
 
 ## Why libhfs
 
@@ -69,22 +69,66 @@ func main() {
 
 Implemented:
 
-- HFS+ and HFSX volume header parsing and validation
+- HFS+, HFSX and classic HFS volume parsing and validation
+- HFS wrapper volumes with an embedded HFS+ filesystem
 - Catalog and Extents B-tree header parsing
 - Catalog traversal (full walk, path lookup, CNID lookup)
 - Directory listing by path and CNID
 - Data fork and resource fork extent resolution (including overflow extents)
 - File reads via `Read`, `ReadAt`, and `ReadAll`
 - Path reconstruction via `PathForCNID`
+- Per-file MACB timestamps on every catalog record
 - HFS+ Unicode name comparison semantics and HFSX case-sensitive mode handling
 - Inline `com.apple.decmpfs` decompression support (raw + zlib inline payloads)
 - Typed error model using standard Go wrapping (`errors.Is` / `errors.As`)
 
 Current limitations:
 
-- Classic HFS volumes are detected but not supported (`ErrUnsupportedFormat`)
 - Read-only library (no write or repair operations)
 - Compression support is limited to inline decmpfs attribute payloads
+- Extended attributes are parsed only for decmpfs; no general listing API yet
+- No deleted-record recovery yet
+- Lookups scan the catalog B-tree linearly rather than descending by key,
+  which is slow on large images
+- Classic HFS carries no extended attributes, access dates, attribute
+  modification dates, hard links or compression — these are properties of the
+  format, not gaps in the parser
+
+See [PLAN.md](PLAN.md) for the roadmap addressing the above.
+
+## Timestamps
+
+Every `CatalogRecord` carries a `Times` field holding the on-disk MACB set:
+
+```go
+rec, err := vol.OpenPath("/etc/hosts")
+if err != nil {
+	log.Fatal(err)
+}
+
+fmt.Println("created:  ", rec.Times.Created)
+fmt.Println("modified: ", rec.Times.ContentModified)
+fmt.Println("attr mod: ", rec.Times.AttrModified)
+fmt.Println("accessed: ", rec.Times.Accessed)
+fmt.Println("backup:   ", rec.Times.Backup)
+```
+
+Two rules matter when using these values:
+
+- **A zero `time.Time` means the field was unset on disk.** It does not mean
+  1904 and it does not mean 1970. Test with `IsZero()` before using a value.
+- **Check `Times.Source` before comparing across volumes.** HFS+ and HFSX
+  catalog dates are GMT (`TimeSourceHFSPlusGMT`). Classic HFS dates are local
+  wall-clock readings with no offset stored anywhere on the volume
+  (`TimeSourceHFSLocal`), so they are not absolute instants.
+
+Classic HFS records only creation, modification and backup dates; `Accessed`
+and `AttrModified` are always zero there.
+
+Note that the volume-level dates on `VolumeHeader` follow different rules: per
+the HFS+ specification `CreateTime` is stored in local time while the other
+volume dates are GMT, and unset fields read back as the Unix epoch rather than
+a zero time.
 
 ## API Highlights
 
@@ -101,6 +145,8 @@ Volume-level:
 - `(*Volume).WalkDir(path string, cb func(DirEntry) error) error`
 - `(*Volume).WalkCatalog(cb func(CatalogRecord) error) error`
 - `(*Volume).PathForCNID(cnid uint32) (string, error)`
+- `(*Volume).GetTimes(cnid uint32) (CatalogTimes, error)`
+- `(*Volume).GetTimesByPath(path string) (CatalogTimes, error)`
 
 File-level:
 

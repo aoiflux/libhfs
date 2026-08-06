@@ -106,6 +106,60 @@ const (
 	CatalogRecordFileThread   CatalogRecordType = CatalogRecordType(catalogRecordFileThread)
 )
 
+// TimeSource describes how a set of catalog timestamps must be interpreted.
+// Callers doing timeline work need this: HFS+ catalog dates are GMT, but
+// classic HFS records wall-clock local time with no recorded UTC offset.
+type TimeSource uint8
+
+const (
+	// TimeSourceUnknown means no timestamps were parsed for the record
+	// (thread records carry none).
+	TimeSourceUnknown TimeSource = iota
+
+	// TimeSourceHFSPlusGMT marks HFS+/HFSX catalog dates: seconds since
+	// 1904-01-01 GMT. Directly comparable across volumes.
+	TimeSourceHFSPlusGMT
+
+	// TimeSourceHFSLocal marks classic HFS dates: seconds since 1904-01-01
+	// in whatever local time the writing Mac was set to, with no offset
+	// stored anywhere on the volume. Treat these as wall-clock readings, not
+	// as absolute instants; they are not comparable across time zones without
+	// an examiner-supplied offset.
+	TimeSourceHFSLocal
+)
+
+func (s TimeSource) String() string {
+	switch s {
+	case TimeSourceHFSPlusGMT:
+		return "HFS+ GMT"
+	case TimeSourceHFSLocal:
+		return "HFS local"
+	default:
+		return "unknown"
+	}
+}
+
+// CatalogTimes holds the on-disk MACB timestamp set for one catalog record.
+//
+// A zero time.Time means the field was unset on disk. It does not mean 1904
+// and it does not mean 1970 — always test with IsZero before using a value.
+// Classic HFS has no access or attribute-modification date, so those two
+// fields are always zero when Source is TimeSourceHFSLocal.
+type CatalogTimes struct {
+	Created         time.Time // birth ("B")
+	ContentModified time.Time // data last written ("M")
+	AttrModified    time.Time // metadata last changed ("C")
+	Accessed        time.Time // last read ("A"); may be disabled volume-wide
+	Backup          time.Time // last backup stamp
+	Source          TimeSource
+}
+
+// IsZero reports whether no timestamp in the set was present on disk.
+func (t CatalogTimes) IsZero() bool {
+	return t.Created.IsZero() && t.ContentModified.IsZero() &&
+		t.AttrModified.IsZero() && t.Accessed.IsZero() && t.Backup.IsZero()
+}
+
 type CatalogRecord struct {
 	Type          CatalogRecordType
 	ParentCNID    uint32
@@ -119,6 +173,7 @@ type CatalogRecord struct {
 	Compressed    bool
 	DataFork      ForkData
 	RsrcFork      ForkData
+	Times         CatalogTimes
 }
 
 func (r CatalogRecord) IsDirectory() bool {

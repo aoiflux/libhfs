@@ -239,11 +239,39 @@ func validateVersion(kind FileSystemKind, ver uint16) error {
 	return nil
 }
 
+// hfsTimeToUnix converts a raw HFS date for volume-level fields.
+//
+// Note that it clamps every value at or below the 1904 epoch delta to the Unix
+// epoch, so an unset field and a genuine 1970 timestamp are indistinguishable
+// in its output. That behaviour is preserved for VolumeHeader compatibility.
+//
+// Two further caveats apply to the volume dates it produces. Per the HFS+
+// specification VolumeHeader.CreateTime is stored in *local* time, while
+// ModifyTime, BackupTime and CheckedTime are GMT; on classic HFS every MDB date
+// is local. The returned time.Time is labelled UTC in all cases, so CreateTime
+// (and all classic-HFS volume dates) should be read as wall-clock values.
+//
+// Deprecated: use hfsCatalogTime for new code. It distinguishes unset fields
+// from real timestamps and preserves pre-1970 values.
 func hfsTimeToUnix(raw uint32) time.Time {
 	if raw <= hfsEpochDeltaSeconds {
 		return time.Unix(0, 0).UTC()
 	}
 	return time.Unix(int64(raw-hfsEpochDeltaSeconds), 0).UTC()
+}
+
+// hfsCatalogTime converts a raw HFS date from a catalog record.
+//
+// A raw value of 0 means the field was never set and yields the zero
+// time.Time. Every other value is offset from the 1904 epoch; values below the
+// Unix epoch produce negative Unix times rather than being clamped, because a
+// pre-1970 date is real evidence and silently rewriting it to 1970 would be a
+// fabrication.
+func hfsCatalogTime(raw uint32) time.Time {
+	if raw == 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(raw)-int64(hfsEpochDeltaSeconds), 0).UTC()
 }
 
 func IsCorrupt(err error) bool {
