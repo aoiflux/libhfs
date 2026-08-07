@@ -110,7 +110,8 @@ type Config struct {
 	// GOMAXPROCS. Any positive value is used as given.
 	//
 	// Results are identical at every worker count, so this is purely a
-	// throughput knob — see CONCURRENCY.md.
+	// throughput knob: each task scans a disjoint span of blocks and its
+	// findings are merged in block order.
 	CarveWorkers int
 
 	// DisableCache turns off both caches. Distinct from CacheSize: zero sizes
@@ -199,10 +200,16 @@ func (v *Volume) Config() Config {
 }
 
 // SetCarveWorkers sets the degree of parallelism used for unallocated-space
-// carving. One forces sequential execution; zero re-derives the default from
+// carving. One forces sequential execution and starts no goroutines at all;
+// zero restores [DefaultCarveWorkers]; [AutoCarveWorkers] scales with
 // GOMAXPROCS.
 //
-// Results do not depend on this value — see CONCURRENCY.md.
+// Results do not depend on this value, so it is safe to tune purely for
+// throughput. Note that the default is sequential because concurrency measured
+// slower on local storage — carving reads contiguous blocks that the operating
+// system prefetches, and concurrent readers defeat that prefetching. Raise it
+// only for a reader with high per-request latency and deep queueing, and
+// measure before doing so.
 //
 // Safe for concurrent use.
 func (v *Volume) SetCarveWorkers(n int) {

@@ -442,8 +442,11 @@ func (v *Volume) readNodeBitmap(hdr BTreeHeaderRecord, nodeAt func(uint32, []byt
 //
 // Parallelism does not change what is found. Each task scans a disjoint span of
 // blocks and returns its own findings; those are concatenated in block order,
-// so the sequence of emitted records is identical at any worker count. See
-// CONCURRENCY.md.
+// so the sequence of emitted records is identical at any worker count, and the
+// caller's callback always runs on the calling goroutine.
+//
+// It is nonetheless sequential by default: see [DefaultCarveWorkers] for the
+// measurement behind that choice.
 func (v *Volume) scanUnallocatedNodes(ctx context.Context, hdr BTreeHeaderRecord, emit func(DeletedRecord) error) error {
 	if hdr.NodeSize == 0 || v.header.BlockSize == 0 {
 		return nil

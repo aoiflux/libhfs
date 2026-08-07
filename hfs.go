@@ -51,7 +51,7 @@
 // # Things that are easy to get wrong
 //
 // Several behaviours matter for forensic use and are not obvious from the
-// signatures alone. FORENSICS.md covers these in more depth.
+// signatures alone.
 //
 // Timestamps. Every [CatalogRecord] carries a [CatalogTimes] holding the MACB
 // set. A zero time.Time means the field was unset on disk — not 1904, and not

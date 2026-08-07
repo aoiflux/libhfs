@@ -33,7 +33,9 @@ func (v *Volume) walkExtentsBTree(cb extentsLeafCallback) error {
 
 // The walk states address nodes through nodeAt, which maps a node number onto
 // the fork's extent list. Computing offsets from the first extent alone breaks
-// once a tree spans more than one extent (PLAN.md B6).
+// once a tree spans more than one extent: reads run off the end of that extent
+// into unrelated blocks and return plausible-looking wrong records rather than
+// an error.
 type catalogWalkState struct {
 	vol     *Volume
 	header  BTreeHeaderRecord
@@ -295,8 +297,8 @@ func (s *extentsWalkState) readNode(nodeNum uint32) ([]byte, BTreeNodeDescriptor
 // file and folder counts; on the corpus image, 36 such regions decoded as
 // valid catalog records.
 //
-// Those bytes are recoverable evidence and are the intended source for
-// node-slack carving (PLAN.md §7, source 5a), but they must be surfaced
+// Those bytes are recoverable evidence and are the intended source for the
+// node-slack recovery pass in deleted.go, but they must be surfaced
 // deliberately through the deleted-record API rather than leaking into live
 // results.
 //

@@ -108,8 +108,9 @@ Current limitations:
   properties of the format, not gaps in the parser, and `Capabilities()`
   reports them
 
-See [FORENSICS.md](FORENSICS.md) for the semantics that matter when this
-output becomes evidence, and [PLAN.md](PLAN.md) for development history.
+The sections below cover the semantics that matter when this output becomes
+evidence. The package documentation repeats them under "Things that are easy to
+get wrong", so they are visible from `go doc` too.
 
 ## Timestamps
 
@@ -183,8 +184,8 @@ Allocation state:
 - `(*Volume).WalkUnallocated(cb func(start, count uint32) error) error`
 - `(*Volume).FreeBlockCount() (uint32, error)`
 
-Deleted-record recovery — see [FORENSICS.md](FORENSICS.md) §6 before relying on
-these:
+Deleted-record recovery — read "Deleted-record recovery" below before relying on
+these, in particular the caveat about `Overwritten`:
 
 - `(*Volume).RecoverDeleted(opts *RecoveryOptions) ([]DeletedRecord, error)`
 - `(*Volume).WalkDeleted(opts *RecoveryOptions, cb func(DeletedRecord) error) error`
@@ -246,6 +247,44 @@ A non-zero `AnomalyCount` is a finding about the volume, not merely a
 performance note: it means part of the filesystem metadata is inconsistent.
 Results remain correct, because the fallback path is an exhaustive walk of every
 node in the tree.
+
+## Deleted-record recovery
+
+Deleting a file on HFS+ removes its catalog record and frees its blocks; it does
+not erase anything. Records therefore survive in B-tree node slack, in nodes the
+tree has stopped using, and in blocks the volume no longer considers allocated.
+
+```go
+recs, err := vol.RecoverDeleted(nil)
+if err != nil {
+	log.Fatal(err)
+}
+for _, r := range recs {
+	fmt.Printf("%s  source=%v  confidence=%v  overwritten=%v\n",
+		r.Record.Name, r.Source, r.Confidence, r.Overwritten)
+}
+```
+
+Four things to understand before treating the output as evidence:
+
+- **`Overwritten` is the field that matters.** A recovered record's extents are
+  stale pointers. If those blocks have since been reallocated, reading them
+  returns another file's data, not the deleted one's. It is computed against the
+  current allocation bitmap.
+- **Not everything found is a deletion.** B-tree inserts leave stale copies of
+  records that are still live. Those are filtered out by default; set
+  `IncludeStaleCopies` to see them.
+- **`Confidence` is advisory triage metadata, never a guarantee.** It grades how
+  much of a record was independently corroborated — whether its parent resolves,
+  whether its extents fall inside the volume. The default surfaces everything
+  with grades attached rather than silently dropping low-confidence findings,
+  because for forensic use a discarded record is worse than a graded one.
+- **Recovery quality depends on reuse**, which correlates with time since
+  deletion and volume pressure — not with anything this library can measure.
+
+Unallocated-block carving is off by default because it reads the entire free
+area of the volume; enable it with `RecoveryOptions.ScanUnallocated`. Use
+`WalkDeletedContext` if you need to be able to cancel it.
 
 ## Testing
 

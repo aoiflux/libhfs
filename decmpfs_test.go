@@ -175,8 +175,12 @@ func TestRegisterDecompressor(t *testing.T) {
 // descriptions of the format and has NOT been validated against a
 // macOS-produced compressed file, because no image containing one was
 // available. These tests confirm the decoder is self-consistent and correctly
-// bounded; they do not confirm the layout matches what macOS writes. See
-// PLAN.md §6.2.
+// bounded; they do not confirm the layout matches what macOS writes.
+//
+// Published descriptions disagree on whether chunk offsets are relative to the
+// start of the resource fork or to the start of the chunk table, and choosing
+// wrong yields plausible-looking garbage rather than an error. Validating this
+// against a real compressed file remains outstanding.
 // ---------------------------------------------------------------------------
 
 func TestDecmpfsResourceForkChunks(t *testing.T) {

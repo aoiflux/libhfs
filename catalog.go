@@ -354,9 +354,12 @@ func (v *Volume) lookupCNIDViaThread(cnid uint32) (CatalogRecord, error) {
 // isPlaceholderRecord reports whether a file record looks like an empty
 // placeholder that a real record with the same identity should win over.
 //
-// This heuristic predates keyed search and is preserved unchanged so this
-// phase stays behaviour-neutral. PLAN.md §0.3 B5 tracks re-deriving it from
-// B-tree key order instead of from record contents.
+// The heuristic keys off record contents rather than B-tree key order, so a
+// genuinely empty file whose CNID also appears in a stale record can resolve
+// unpredictably. It predates keyed descent and is preserved unchanged because
+// altering it would change which record a duplicate CNID resolves to — a
+// visible behaviour change that belongs in its own commit, not smuggled in
+// alongside a performance rewrite. Re-deriving it from key order is the fix.
 func (v *Volume) isPlaceholderRecord(r CatalogRecord) bool {
 	return v.kind != KindHFS &&
 		r.Type == CatalogRecordFile &&
