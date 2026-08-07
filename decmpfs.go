@@ -58,10 +58,42 @@ type DecompressorFunc func(dst, src []byte) (int, error)
 
 func (f DecompressorFunc) Decompress(dst, src []byte) (int, error) { return f(dst, src) }
 
-var (
-	codecMu sync.RWMutex
-	codecs  = map[uint32]Decompressor{}
-)
+// codecRegistry maps decmpfs compression types to decoders.
+//
+// It is a value type with its own lock so a Volume can hold one, rather than
+// every volume in the process sharing a single package-level map.
+type codecRegistry struct {
+	mu     sync.RWMutex
+	codecs map[uint32]Decompressor
+}
+
+func (r *codecRegistry) set(compressionType uint32, d Decompressor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if d == nil {
+		delete(r.codecs, compressionType)
+		return
+	}
+	if r.codecs == nil {
+		r.codecs = make(map[uint32]Decompressor)
+	}
+	r.codecs[compressionType] = d
+}
+
+func (r *codecRegistry) get(compressionType uint32) (Decompressor, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	d, ok := r.codecs[compressionType]
+	return d, ok
+}
+
+// globalCodecs backs [RegisterDecompressor], which registers process-wide.
+//
+// Process-wide registration is the convenient form and stays supported, but it
+// is shared mutable state: two consumers in one binary can overwrite each
+// other's codecs. [Volume.RegisterDecompressor] scopes a codec to one volume
+// and takes precedence, so a caller who needs isolation has it.
+var globalCodecs codecRegistry
 
 // RegisterDecompressor installs a codec for a decmpfs compression type,
 // replacing any existing registration.
@@ -76,20 +108,33 @@ var (
 //
 // Safe for concurrent use, but intended to be called during initialisation.
 func RegisterDecompressor(compressionType uint32, d Decompressor) {
-	codecMu.Lock()
-	defer codecMu.Unlock()
-	if d == nil {
-		delete(codecs, compressionType)
-		return
-	}
-	codecs[compressionType] = d
+	globalCodecs.set(compressionType, d)
 }
 
-func lookupDecompressor(compressionType uint32) (Decompressor, bool) {
-	codecMu.RLock()
-	defer codecMu.RUnlock()
-	d, ok := codecs[compressionType]
-	return d, ok
+// RegisterDecompressor installs a codec for this volume only, taking precedence
+// over any registered process-wide by [RegisterDecompressor].
+//
+// Prefer this when a process reads several volumes, or when a library should
+// not impose its codec choices on the rest of the binary. Passing nil removes
+// the volume-scoped codec, falling back to the process-wide one.
+//
+// Safe for concurrent use.
+func (v *Volume) RegisterDecompressor(compressionType uint32, d Decompressor) {
+	if v == nil {
+		return
+	}
+	v.codecs.set(compressionType, d)
+}
+
+// lookupDecompressor finds a codec for a compression type, preferring one
+// registered on the volume over one registered process-wide.
+func (v *Volume) lookupDecompressor(compressionType uint32) (Decompressor, bool) {
+	if v != nil {
+		if d, ok := v.codecs.get(compressionType); ok {
+			return d, true
+		}
+	}
+	return globalCodecs.get(compressionType)
 }
 
 // decmpfsHeader is the 16-byte header at the start of the attribute.
@@ -174,7 +219,7 @@ func (v *Volume) decodeInlinePayload(h decmpfsHeader, raw []byte) ([]byte, error
 		return out, nil
 	}
 
-	if d, ok := lookupDecompressor(h.CompressionType); ok {
+	if d, ok := v.lookupDecompressor(h.CompressionType); ok {
 		dst := make([]byte, size)
 		n, err := d.Decompress(dst, raw)
 		if err != nil {
@@ -216,7 +261,7 @@ func (v *Volume) decodeResourceForkPayload(h decmpfsHeader, rec CatalogRecord) (
 			return append([]byte(nil), src...), nil
 		}
 	default:
-		d, ok := lookupDecompressor(h.CompressionType)
+		d, ok := v.lookupDecompressor(h.CompressionType)
 		if !ok {
 			return nil, unsupportedCompression(h.CompressionType)
 		}

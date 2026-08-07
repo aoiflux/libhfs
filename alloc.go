@@ -21,8 +21,8 @@ func (v *Volume) BlockAllocated(block uint32) (bool, error) {
 		return false, &ParseError{Op: "block_allocated", Offset: int64(block), Err: ErrInvalidOffset}
 	}
 
-	byteOff := int64(block / 8)
-	mask := byte(1) << (7 - block%8)
+	byteOff := int64(block / bitsPerByte)
+	mask := byte(1) << (bitmapMSBFirst - block%bitsPerByte)
 
 	var b [1]byte
 	if err := v.readBitmapAt(byteOff, b[:]); err != nil {
@@ -50,8 +50,7 @@ func (v *Volume) WalkUnallocated(cb func(start, count uint32) error) error {
 		return nil
 	}
 
-	const chunkBytes = 64 << 10
-	buf := make([]byte, chunkBytes)
+	buf := make([]byte, bitmapChunkBytes)
 
 	var runStart uint32
 	var runLen uint32
@@ -65,9 +64,9 @@ func (v *Volume) WalkUnallocated(cb func(start, count uint32) error) error {
 		return err
 	}
 
-	bitmapBytes := int64((total + 7) / 8)
-	for off := int64(0); off < bitmapBytes; off += chunkBytes {
-		n := int64(chunkBytes)
+	bitmapBytes := int64((total + bitsPerByte - 1) / bitsPerByte)
+	for off := int64(0); off < bitmapBytes; off += bitmapChunkBytes {
+		n := int64(bitmapChunkBytes)
 		if off+n > bitmapBytes {
 			n = bitmapBytes - off
 		}
@@ -77,7 +76,7 @@ func (v *Volume) WalkUnallocated(cb func(start, count uint32) error) error {
 		}
 
 		for i, bt := range chunk {
-			base := uint32(off+int64(i)) * 8
+			base := uint32(off+int64(i)) * bitsPerByte
 			// A fully allocated byte is the common case on a used volume, so
 			// short-circuit rather than testing eight bits.
 			if bt == 0xFF {
@@ -86,12 +85,12 @@ func (v *Volume) WalkUnallocated(cb func(start, count uint32) error) error {
 				}
 				continue
 			}
-			for bit := range 8 {
+			for bit := range bitsPerByte {
 				block := base + uint32(bit)
 				if block >= total {
 					break
 				}
-				if bt&(1<<(7-bit)) != 0 {
+				if bt&(1<<(bitmapMSBFirst-bit)) != 0 {
 					if err := flush(); err != nil {
 						return err
 					}
@@ -151,5 +150,5 @@ func (v *Volume) readBitmapAt(off int64, dst []byte) error {
 // sectors from the volume start, and the bitmap sits between the MDB and the
 // first allocation block.
 func (v *Volume) hfsBitmapOffset() int64 {
-	return int64(v.hfsVBMStart) * 512
+	return int64(v.hfsVBMStart) * hfsSectorSize
 }

@@ -169,16 +169,9 @@ func Open(r io.ReaderAt) (*Volume, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &Volume{
-				reader:       r,
-				kind:         KindHFS,
-				header:       hdr,
-				baseOffset:   hfsBase,
-				hfsVBMStart:  vbmStart,
-				cacheMax:     DefaultCacheSize,
-				nodeCacheMax: DefaultNodeCacheSize,
-				maxAlloc:     DefaultMaxAlloc,
-			}, nil
+			vol := newVolume(r, KindHFS, hdr, hfsBase)
+			vol.hfsVBMStart = vbmStart
+			return vol, nil
 		}
 		// An HFS wrapper around an embedded HFS+ volume: re-read the header
 		// from the embedded volume and treat its start as the base offset.
@@ -193,13 +186,26 @@ func Open(r io.ReaderAt) (*Volume, error) {
 		return nil, err
 	}
 
+	return newVolume(r, kind, hdr, baseOffset), nil
+}
+
+// newVolume builds a Volume with default configuration.
+//
+// Open reaches this from two paths — a classic HFS master directory block and
+// an HFS+ volume header — which must not drift apart in what they initialise.
+// Adding a field to Volume and forgetting one of them is exactly the kind of
+// omission a single constructor prevents.
+func newVolume(r io.ReaderAt, kind FileSystemKind, hdr VolumeHeader, baseOffset int64) *Volume {
+	cfg := DefaultConfig().normalise()
 	return &Volume{
 		reader:       r,
 		kind:         kind,
 		header:       hdr,
 		baseOffset:   baseOffset,
-		cacheMax:     DefaultCacheSize,
-		nodeCacheMax: DefaultNodeCacheSize,
-		maxAlloc:     DefaultMaxAlloc,
-	}, nil
+		cacheMax:     cfg.CacheSize,
+		nodeCacheMax: cfg.NodeCacheSize,
+		maxAlloc:     cfg.MaxAlloc,
+		textEncoding: cfg.TextEncoding,
+		carveWorkers: cfg.CarveWorkers,
+	}
 }

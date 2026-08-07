@@ -7,11 +7,11 @@ func parseBTreeNodeDescriptor(node []byte) (BTreeNodeDescriptor, error) {
 		return BTreeNodeDescriptor{}, &ParseError{Op: "parse_btree_node", Offset: 0, Err: ErrShortRead}
 	}
 	return BTreeNodeDescriptor{
-		ForwardLink:  be32(node[0:4]),
-		BackwardLink: be32(node[4:8]),
-		Type:         int8(node[8]),
-		Height:       node[9],
-		NumRecords:   be16(node[10:12]),
+		ForwardLink:  be32(node[nodeForwardLink : nodeForwardLink+4]),
+		BackwardLink: be32(node[nodeBackwardLink : nodeBackwardLink+4]),
+		Type:         int8(node[nodeType]),
+		Height:       node[nodeHeight],
+		NumRecords:   be16(node[nodeNumRecords : nodeNumRecords+2]),
 	}, nil
 }
 
@@ -21,22 +21,22 @@ func parseBTreeHeaderRecord(rec []byte) (BTreeHeaderRecord, error) {
 	}
 
 	h := BTreeHeaderRecord{
-		Depth:         be16(rec[0:2]),
-		RootNode:      be32(rec[2:6]),
-		LeafRecords:   be32(rec[6:10]),
-		FirstLeafNode: be32(rec[10:14]),
-		LastLeafNode:  be32(rec[14:18]),
-		NodeSize:      be16(rec[18:20]),
-		MaxKeyLen:     be16(rec[20:22]),
-		TotalNodes:    be32(rec[22:26]),
-		FreeNodes:     be32(rec[26:30]),
-		ClumpSize:     be32(rec[32:36]),
-		Type:          rec[36],
-		CompType:      rec[37],
-		Attributes:    be32(rec[38:42]),
+		Depth:         be16(rec[btHdrDepth : btHdrDepth+2]),
+		RootNode:      be32(rec[btHdrRootNode : btHdrRootNode+4]),
+		LeafRecords:   be32(rec[btHdrLeafRecords : btHdrLeafRecords+4]),
+		FirstLeafNode: be32(rec[btHdrFirstLeafNode : btHdrFirstLeafNode+4]),
+		LastLeafNode:  be32(rec[btHdrLastLeafNode : btHdrLastLeafNode+4]),
+		NodeSize:      be16(rec[btHdrNodeSize : btHdrNodeSize+2]),
+		MaxKeyLen:     be16(rec[btHdrMaxKeyLength : btHdrMaxKeyLength+2]),
+		TotalNodes:    be32(rec[btHdrTotalNodes : btHdrTotalNodes+4]),
+		FreeNodes:     be32(rec[btHdrFreeNodes : btHdrFreeNodes+4]),
+		ClumpSize:     be32(rec[btHdrClumpSize : btHdrClumpSize+4]),
+		Type:          rec[btHdrBTreeType],
+		CompType:      rec[btHdrKeyCompareTyp],
+		Attributes:    be32(rec[btHdrAttributes : btHdrAttributes+4]),
 	}
 
-	if h.NodeSize < 512 || h.NodeSize > 32768 {
+	if h.NodeSize < minBTreeNodeSize || h.NodeSize > maxBTreeNodeSize {
 		return BTreeHeaderRecord{}, &ParseError{Op: "parse_btree_header", Offset: 0, Err: ErrInvalidBTreeNode}
 	}
 	if h.TotalNodes == 0 {
@@ -47,56 +47,56 @@ func parseBTreeHeaderRecord(rec []byte) (BTreeHeaderRecord, error) {
 }
 
 func parseCatalogKey(raw []byte) (CatalogKey, int, error) {
-	if len(raw) < 8 {
+	if len(raw) < catKeyMinSize {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	keyLen := be16(raw[0:2])
 	total := int(keyLen) + 2
-	if total > len(raw) || total < 8 {
+	if total > len(raw) || total < catKeyMinSize {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	body := raw[2:total]
-	nameChars := int(be16(body[4:6]))
-	need := 6 + nameChars*2
+	nameChars := int(be16(body[catKeyNameLength : catKeyNameLength+2]))
+	need := catKeyName + nameChars*utf16CodeUnitSize
 	if need > len(body) {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	name := make([]uint16, nameChars)
 	for i := 0; i < nameChars; i++ {
-		base := 6 + i*2
+		base := catKeyName + i*utf16CodeUnitSize
 		name[i] = be16(body[base : base+2])
 	}
 
 	return CatalogKey{
 		KeyLength:  keyLen,
-		ParentCNID: be32(body[0:4]),
+		ParentCNID: be32(body[catKeyParentID : catKeyParentID+4]),
 		NameUTF16:  name,
 	}, total, nil
 }
 
 func parseCatalogKeyHFS(raw []byte) (CatalogKey, int, error) {
-	if len(raw) < 7 {
+	if len(raw) < hfsCatKeyMinSize {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	keyLen := int(raw[0])
 	total := keyLen + 1
-	if total > len(raw) || total < 7 {
+	if total > len(raw) || total < hfsCatKeyMinSize {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	body := raw[1:total]
-	parent := be32(body[1:5])
-	nameLen := int(body[5])
-	if nameLen < 0 || nameLen > 31 || 6+nameLen > len(body) {
+	parent := be32(body[hfsCatKeyParentID : hfsCatKeyParentID+4])
+	nameLen := int(body[hfsCatKeyNameLength])
+	if nameLen < 0 || nameLen > hfsCatKeyMaxName || hfsCatKeyName+nameLen > len(body) {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	nameBytes := make([]byte, nameLen)
-	copy(nameBytes, body[6:6+nameLen])
+	copy(nameBytes, body[hfsCatKeyName:hfsCatKeyName+nameLen])
 
 	// NameUTF16 keeps the raw byte values so key ordering stays a pure function
 	// of the bytes on disk. The displayed name is decoded separately, per
@@ -122,17 +122,17 @@ func parseCatalogKeyHFS(raw []byte) (CatalogKey, int, error) {
 }
 
 func parseExtentsKey(raw []byte) (ExtentsKey, int, error) {
-	if len(raw) < 12 {
+	if len(raw) < extKeyMinSize {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	keyLen := be16(raw[0:2])
 	total := int(keyLen) + 2
-	if total > len(raw) || total < 12 {
+	if total > len(raw) || total < extKeyMinSize {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
-	forkType := raw[2]
+	forkType := raw[extKeyForkType]
 	if forkType != extentKeyTypeData && forkType != extentKeyTypeRsrc {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
@@ -140,24 +140,24 @@ func parseExtentsKey(raw []byte) (ExtentsKey, int, error) {
 	return ExtentsKey{
 		KeyLength:  keyLen,
 		ForkType:   forkType,
-		FileID:     be32(raw[4:8]),
-		StartBlock: be32(raw[8:12]),
+		FileID:     be32(raw[extKeyFileID : extKeyFileID+4]),
+		StartBlock: be32(raw[extKeyStartBlock : extKeyStartBlock+4]),
 	}, total, nil
 }
 
 func parseExtentsKeyHFS(raw []byte) (ExtentsKey, int, error) {
-	if len(raw) < 8 {
+	if len(raw) < hfsExtKeyMinSize {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	keyLen := int(raw[0])
 	total := keyLen + 1
-	if total > len(raw) || total < 8 {
+	if total > len(raw) || total < hfsExtKeyMinSize {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
 	body := raw[1:total]
-	forkType := body[0]
+	forkType := body[hfsExtKeyForkType]
 	if forkType != extentKeyTypeData && forkType != extentKeyTypeRsrc {
 		return ExtentsKey{}, 0, &ParseError{Op: "parse_extents_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
@@ -172,8 +172,8 @@ func parseExtentsKeyHFS(raw []byte) (ExtentsKey, int, error) {
 	return ExtentsKey{
 		KeyLength:  uint16(keyLen),
 		ForkType:   forkType,
-		FileID:     be32(body[1:5]),
-		StartBlock: uint32(be16(body[5:7])),
+		FileID:     be32(body[hfsExtKeyFileID : hfsExtKeyFileID+4]),
+		StartBlock: uint32(be16(body[hfsExtKeyStartBlock : hfsExtKeyStartBlock+2])),
 	}, total, nil
 }
 
@@ -196,8 +196,8 @@ func parseNodeRecordOffsets(node []byte, numRecords uint16) ([]uint16, error) {
 		return nil, &ParseError{Op: "parse_node_offsets", Offset: 0, Err: ErrShortRead}
 	}
 
-	count := int(numRecords) + 1
-	needed := count * 2
+	count := int(numRecords) + 1 // the extra entry marks the start of free space
+	needed := count * nodeRecordOffsetSize
 	if len(node) < needed {
 		return nil, &ParseError{Op: "parse_node_offsets", Offset: 0, Err: ErrInvalidBTreeNode}
 	}
@@ -205,11 +205,11 @@ func parseNodeRecordOffsets(node []byte, numRecords uint16) ([]uint16, error) {
 	offs := make([]uint16, count)
 	nodeSize := len(node)
 	for i := 0; i < count; i++ {
-		base := nodeSize - 2*(i+1)
-		if base < 0 || base+2 > nodeSize {
+		base := nodeSize - nodeRecordOffsetSize*(i+1)
+		if base < 0 || base+nodeRecordOffsetSize > nodeSize {
 			return nil, &ParseError{Op: "parse_node_offsets", Offset: 0, Err: ErrInvalidBTreeNode}
 		}
-		v := be16(node[base : base+2])
+		v := be16(node[base : base+nodeRecordOffsetSize])
 		if int(v) > nodeSize {
 			return nil, &ParseError{Op: "parse_node_offsets", Offset: 0, Err: ErrInvalidBTreeNode}
 		}

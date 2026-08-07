@@ -2,14 +2,6 @@ package hfs
 
 import "errors"
 
-// DefaultMaxAlloc bounds any single buffer sized from an on-disk field.
-//
-// Sizes read from a volume are attacker-controlled in the sense that matters
-// here: a corrupt or hostile image can declare a fork of 2^60 bytes, and
-// allocating that would take the process down with an OOM kill rather than an
-// error. Being panic-free is not much use if the caller dies anyway.
-const DefaultMaxAlloc = int64(1) << 30 // 1 GiB
-
 // ErrSizeLimit reports that an on-disk size field exceeded the volume's
 // allocation limit. See [Volume.SetMaxAlloc].
 var ErrSizeLimit = errors.New("hfs: declared size exceeds allocation limit")

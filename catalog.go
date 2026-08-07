@@ -1,6 +1,7 @@
 package hfs
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strings"
@@ -15,11 +16,11 @@ var errStopWalk = errors.New("hfs: stop walk")
 // payload is at least 88 bytes.
 func decodeCatalogTimesHFSPlus(payload []byte) CatalogTimes {
 	return CatalogTimes{
-		Created:         hfsCatalogTime(be32(payload[12:16])),
-		ContentModified: hfsCatalogTime(be32(payload[16:20])),
-		AttrModified:    hfsCatalogTime(be32(payload[20:24])),
-		Accessed:        hfsCatalogTime(be32(payload[24:28])),
-		Backup:          hfsCatalogTime(be32(payload[28:32])),
+		Created:         hfsCatalogTime(be32(payload[catCreateDate : catCreateDate+4])),
+		ContentModified: hfsCatalogTime(be32(payload[catContentModDte : catContentModDte+4])),
+		AttrModified:    hfsCatalogTime(be32(payload[catAttrModDate : catAttrModDate+4])),
+		Accessed:        hfsCatalogTime(be32(payload[catAccessDate : catAccessDate+4])),
+		Backup:          hfsCatalogTime(be32(payload[catBackupDate : catBackupDate+4])),
 		Source:          TimeSourceHFSPlusGMT,
 	}
 }
@@ -30,9 +31,9 @@ func decodeCatalogTimesHFSPlus(payload []byte) CatalogTimes {
 // payload is at least 56 bytes.
 func decodeCatalogTimesHFSFile(payload []byte) CatalogTimes {
 	return CatalogTimes{
-		Created:         hfsCatalogTime(be32(payload[44:48])),
-		ContentModified: hfsCatalogTime(be32(payload[48:52])),
-		Backup:          hfsCatalogTime(be32(payload[52:56])),
+		Created:         hfsCatalogTime(be32(payload[hfsFilCreateDate : hfsFilCreateDate+4])),
+		ContentModified: hfsCatalogTime(be32(payload[hfsFilModifyDate : hfsFilModifyDate+4])),
+		Backup:          hfsCatalogTime(be32(payload[hfsFilBackupDate : hfsFilBackupDate+4])),
 		Source:          TimeSourceHFSLocal,
 	}
 }
@@ -42,9 +43,9 @@ func decodeCatalogTimesHFSFile(payload []byte) CatalogTimes {
 // payload is at least 22 bytes.
 func decodeCatalogTimesHFSDir(payload []byte) CatalogTimes {
 	return CatalogTimes{
-		Created:         hfsCatalogTime(be32(payload[10:14])),
-		ContentModified: hfsCatalogTime(be32(payload[14:18])),
-		Backup:          hfsCatalogTime(be32(payload[18:22])),
+		Created:         hfsCatalogTime(be32(payload[hfsDirCreateDate : hfsDirCreateDate+4])),
+		ContentModified: hfsCatalogTime(be32(payload[hfsDirModifyDate : hfsDirModifyDate+4])),
+		Backup:          hfsCatalogTime(be32(payload[hfsDirBackupDate : hfsDirBackupDate+4])),
 		Source:          TimeSourceHFSLocal,
 	}
 }
@@ -63,11 +64,11 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 
 	switch recType {
 	case catalogRecordFolder:
-		if len(payload) < 88 {
+		if len(payload) < catFolderRecordSize {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record", Offset: 0, Err: ErrCorrupt}
 		}
-		rec.Valence = be32(payload[4:8])
-		rec.CNID = be32(payload[8:12])
+		rec.Valence = be32(payload[catValence : catValence+4])
+		rec.CNID = be32(payload[catNodeID : catNodeID+4])
 		rec.Times = decodeCatalogTimesHFSPlus(payload)
 		rec.Perms = parseBSDInfo(payload)
 		rec.LinkID = rec.Perms.Special
@@ -75,52 +76,52 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 		// bounds, not a type/creator pair. They are read into FinderType and
 		// FinderCreator for backward compatibility, but the meaningful form for
 		// a folder is the raw FinderInfo block.
-		rec.FinderType = be32(payload[48:52])
-		rec.FinderCreator = be32(payload[52:56])
-		copy(rec.FinderInfo[:], payload[48:80])
+		rec.FinderType = be32(payload[catFileType : catFileType+4])
+		rec.FinderCreator = be32(payload[catFileCreator : catFileCreator+4])
+		copy(rec.FinderInfo[:], payload[catFinderBlock:catFinderBlock+catFinderBlockSize])
 		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, true)
 		if rec.Link == LinkHardDir {
 			rec.LinkTarget = rec.Perms.Special
 		}
 		return rec, nil
 	case catalogRecordFile:
-		if len(payload) < 88 {
+		if len(payload) < catFolderRecordSize {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record", Offset: 0, Err: ErrCorrupt}
 		}
-		rec.CNID = be32(payload[8:12])
+		rec.CNID = be32(payload[catNodeID : catNodeID+4])
 		rec.Times = decodeCatalogTimesHFSPlus(payload)
 		rec.Perms = parseBSDInfo(payload)
 		rec.LinkID = rec.Perms.Special
-		rec.FinderType = be32(payload[48:52])
-		rec.FinderCreator = be32(payload[52:56])
-		copy(rec.FinderInfo[:], payload[48:80])
+		rec.FinderType = be32(payload[catFileType : catFileType+4])
+		rec.FinderCreator = be32(payload[catFileCreator : catFileCreator+4])
+		copy(rec.FinderInfo[:], payload[catFinderBlock:catFinderBlock+catFinderBlockSize])
 		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, false)
 		if rec.Link == LinkHardFile {
 			rec.LinkTarget = rec.Perms.Special
 		}
-		if len(payload) >= 168 {
-			rec.DataFork = parseForkData(payload[88:168])
+		if len(payload) >= catRsrcFork {
+			rec.DataFork = parseForkData(payload[catDataFork:catRsrcFork])
 		}
-		if len(payload) >= 248 {
-			rec.RsrcFork = parseForkData(payload[168:248])
+		if len(payload) >= catFileRecordSize {
+			rec.RsrcFork = parseForkData(payload[catRsrcFork:catFileRecordSize])
 		}
 		return rec, nil
 	case catalogRecordFolderThread, catalogRecordFileThread:
-		if len(payload) < 10 {
+		if len(payload) < threadHeaderSize {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record", Offset: 0, Err: ErrCorrupt}
 		}
 		rec.CNID = 0
 		rec.ThreadCNID = key.ParentCNID
-		rec.ParentCNID = be32(payload[4:8])
-		nameChars := int(be16(payload[8:10]))
-		need := 10 + nameChars*2
+		rec.ParentCNID = be32(payload[threadParentID : threadParentID+4])
+		nameChars := int(be16(payload[threadNameLength : threadNameLength+2]))
+		need := threadName + nameChars*utf16CodeUnitSize
 		if need > len(payload) {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record", Offset: 0, Err: ErrCorrupt}
 		}
 		u16 := make([]uint16, nameChars)
-		for i := 0; i < nameChars; i++ {
-			base := 10 + i*2
-			u16[i] = be16(payload[base : base+2])
+		for i := range nameChars {
+			base := threadName + i*utf16CodeUnitSize
+			u16[i] = be16(payload[base : base+utf16CodeUnitSize])
 		}
 		rec.Name = string(utf16.Decode(u16))
 		return rec, nil
@@ -136,47 +137,47 @@ func (v *Volume) decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSiz
 
 	rec := CatalogRecord{ParentCNID: key.ParentCNID, Name: v.decodeHFSName(key.NameBytes)}
 
+	// blocksFor converts a physical byte count to allocation blocks, rounding
+	// up. Classic HFS records physical sizes in bytes, not blocks.
+	blocksFor := func(physicalBytes uint32) uint32 {
+		if blockSize == 0 {
+			return 0
+		}
+		return uint32((uint64(physicalBytes) + uint64(blockSize) - 1) / uint64(blockSize))
+	}
+
 	switch payload[0] {
-	case 0x01: // folder
+	case hfsRecordTypeFolder:
 		rec.Type = CatalogRecordFolder
-		// 22 bytes covers CatDirRec through dirBkDat.
-		if len(payload) < 22 {
+		if len(payload) < hfsDirMinSize {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
-		// dirVal is at offset 4 and dirDirID at 6; offset 10 is dirCrDat.
-		rec.Valence = uint32(be16(payload[4:6]))
-		rec.CNID = be32(payload[6:10])
+		rec.Valence = uint32(be16(payload[hfsDirValence : hfsDirValence+2]))
+		rec.CNID = be32(payload[hfsDirDirID : hfsDirDirID+4])
 		rec.Times = decodeCatalogTimesHFSDir(payload)
 		return rec, nil
-	case 0x02: // file
+
+	case hfsRecordTypeFile:
 		rec.Type = CatalogRecordFile
-		if len(payload) < 98 {
+		if len(payload) < hfsFilMinSize {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
-		rec.CNID = be32(payload[20:24])
+		rec.CNID = be32(payload[hfsFilFileNumber : hfsFilFileNumber+4])
 		rec.Times = decodeCatalogTimesHFSFile(payload)
-		// filUsrWds (an FInfo) sits at offset 4: fdType then fdCreator.
-		rec.FinderType = be32(payload[4:8])
-		rec.FinderCreator = be32(payload[8:12])
-		dataLogical := uint32(be32(payload[26:30]))
-		dataPhysical := uint32(be32(payload[30:34]))
-		rec.DataFork.LogicalSize = uint64(dataLogical)
-		if blockSize != 0 {
-			rec.DataFork.TotalBlocks = uint32((uint64(dataPhysical) + uint64(blockSize) - 1) / uint64(blockSize))
-		}
-		dataExtents, err := parseExtentsRecordHFS(payload[74:86])
+		rec.FinderType = be32(payload[hfsFilFdType : hfsFilFdType+4])
+		rec.FinderCreator = be32(payload[hfsFilFdCreator : hfsFilFdCreator+4])
+
+		rec.DataFork.LogicalSize = uint64(be32(payload[hfsFilLogicalSize : hfsFilLogicalSize+4]))
+		rec.DataFork.TotalBlocks = blocksFor(be32(payload[hfsFilPhysSize : hfsFilPhysSize+4]))
+		dataExtents, err := parseExtentsRecordHFS(payload[hfsFilExtentRec : hfsFilExtentRec+hfsExtentRecordSize])
 		if err != nil {
 			return CatalogRecord{}, err
 		}
 		copy(rec.DataFork.Extents[:], dataExtents)
 
-		rsrcLogical := uint32(be32(payload[36:40]))
-		rsrcPhysical := uint32(be32(payload[40:44]))
-		rec.RsrcFork.LogicalSize = uint64(rsrcLogical)
-		if blockSize != 0 {
-			rec.RsrcFork.TotalBlocks = uint32((uint64(rsrcPhysical) + uint64(blockSize) - 1) / uint64(blockSize))
-		}
-		rsrcExtents, err := parseExtentsRecordHFS(payload[86:98])
+		rec.RsrcFork.LogicalSize = uint64(be32(payload[hfsFilRLogicalLen : hfsFilRLogicalLen+4]))
+		rec.RsrcFork.TotalBlocks = blocksFor(be32(payload[hfsFilRPhysLen : hfsFilRPhysLen+4]))
+		rsrcExtents, err := parseExtentsRecordHFS(payload[hfsFilRExtentRec : hfsFilRExtentRec+hfsExtentRecordSize])
 		if err != nil {
 			return CatalogRecord{}, err
 		}
@@ -231,6 +232,26 @@ func (v *Volume) CatalogRecords() ([]CatalogRecord, error) {
 		return nil, err
 	}
 	return recs, nil
+}
+
+// WalkCatalogContext is [Volume.WalkCatalog] with cancellation.
+//
+// A full catalog walk on a large image reads every leaf node, so a caller that
+// cannot wait needs a way out. The context is checked once per record;
+// its error is returned.
+func (v *Volume) WalkCatalogContext(ctx context.Context, cb func(CatalogRecord) error) error {
+	if cb == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return v.WalkCatalog(func(r CatalogRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return cb(r)
+	})
 }
 
 func (v *Volume) WalkCatalog(cb func(CatalogRecord) error) error {

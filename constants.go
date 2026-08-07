@@ -18,14 +18,17 @@ const (
 
 // Classic HFS MDB offsets (from start of 512-byte MDB at offset 1024 on disk).
 const (
-	hfsMDBOffCreateTime    = 2
-	hfsMDBOffModifyTime    = 6
-	hfsMDBOffAttributes    = 10
-	hfsMDBOffFileCount     = 12
-	hfsMDBOffVBMStart      = 14
-	hfsMDBOffAllocPtr      = 16
-	hfsMDBOffTotalBlocks   = 18
-	hfsMDBOffBlockSize     = 20
+	hfsMDBOffCreateTime  = 2
+	hfsMDBOffModifyTime  = 6
+	hfsMDBOffAttributes  = 10
+	hfsMDBOffFileCount   = 12
+	hfsMDBOffVBMStart    = 14
+	hfsMDBOffAllocPtr    = 16
+	hfsMDBOffTotalBlocks = 18
+	hfsMDBOffBlockSize   = 20
+	// hfsMDBOffAlBlSt is drAlBlSt: the first allocation block, in 512-byte
+	// sectors from the start of the volume.
+	hfsMDBOffAlBlSt        = 28
 	hfsMDBOffNextCatalogID = 30
 	hfsMDBOffFreeBlocks    = 34
 	hfsMDBOffBackupTime    = 64

@@ -12,7 +12,7 @@ func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
 	if len(mdb) < volumeHeaderSize {
 		return 0, false
 	}
-	if be16(mdb[0:2]) != signatureHFS {
+	if be16(mdb[volHdrSignature:volHdrSignature+2]) != signatureHFS {
 		return 0, false
 	}
 	if be16(mdb[hfsMDBOffEmbedSigWord:hfsMDBOffEmbedSigWord+2]) != signatureHFSP {
@@ -20,7 +20,7 @@ func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
 	}
 
 	allocBlockSize := be32(mdb[hfsMDBOffBlockSize : hfsMDBOffBlockSize+4])
-	allocBlockStart512 := be16(mdb[28:30])
+	allocBlockStart512 := be16(mdb[hfsMDBOffAlBlSt : hfsMDBOffAlBlSt+2])
 	embedStartBlock := be16(mdb[hfsMDBOffEmbedExtent : hfsMDBOffEmbedExtent+2])
 	embedBlockCount := be16(mdb[hfsMDBOffEmbedExtent+2 : hfsMDBOffEmbedExtent+4])
 
@@ -28,7 +28,7 @@ func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
 		return 0, false
 	}
 
-	return int64(allocBlockStart512)*512 + int64(embedStartBlock)*int64(allocBlockSize), true
+	return int64(allocBlockStart512)*hfsSectorSize + int64(embedStartBlock)*int64(allocBlockSize), true
 }
 
 // parseHFSMasterDirectoryBlock decodes a classic HFS MDB. It returns the header,
@@ -39,7 +39,7 @@ func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, uint16, erro
 	if len(mdb) < volumeHeaderSize {
 		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrShortRead}
 	}
-	if be16(mdb[0:2]) != signatureHFS {
+	if be16(mdb[volHdrSignature:volHdrSignature+2]) != signatureHFS {
 		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrInvalidSignature}
 	}
 
@@ -49,8 +49,8 @@ func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, uint16, erro
 		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrCorrupt}
 	}
 
-	allocBlockStart512 := be16(mdb[28:30])
-	dataBase := int64(allocBlockStart512) * 512
+	allocBlockStart512 := be16(mdb[hfsMDBOffAlBlSt : hfsMDBOffAlBlSt+2])
+	dataBase := int64(allocBlockStart512) * hfsSectorSize
 
 	hdr := VolumeHeader{
 		Signature:      signatureHFS,
@@ -69,7 +69,7 @@ func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, uint16, erro
 		WriteCount:     uint32(be16(mdb[hfsMDBOffWriteCount : hfsMDBOffWriteCount+2])),
 	}
 
-	for i := 0; i < 8; i++ {
+	for i := range extentRecordCount {
 		off := hfsMDBOffFinderInfo + i*4
 		hdr.FinderInfo[i] = be32(mdb[off : off+4])
 	}
@@ -111,8 +111,8 @@ func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
 		return VolumeHeader{}, "", &ParseError{Op: "parse_header", Offset: volumeHeaderOffset, Err: ErrShortRead}
 	}
 
-	sig := be16(buf[0:2])
-	ver := be16(buf[2:4])
+	sig := be16(buf[volHdrSignature : volHdrSignature+2])
+	ver := be16(buf[volHdrVersion : volHdrVersion+2])
 
 	kind, err := kindFromSignature(sig)
 	if err != nil {
@@ -128,37 +128,37 @@ func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
 	hdr := VolumeHeader{
 		Signature:          sig,
 		Version:            ver,
-		Attributes:         be32(buf[4:8]),
-		LastMountedVersion: be32(buf[8:12]),
-		JournalInfoBlock:   be32(buf[12:16]),
-		CreateTime:         hfsTimeToUnix(be32(buf[16:20])),
-		ModifyTime:         hfsTimeToUnix(be32(buf[20:24])),
-		BackupTime:         hfsTimeToUnix(be32(buf[24:28])),
-		CheckedTime:        hfsTimeToUnix(be32(buf[28:32])),
-		FileCount:          be32(buf[32:36]),
-		FolderCount:        be32(buf[36:40]),
-		BlockSize:          be32(buf[40:44]),
-		TotalBlocks:        be32(buf[44:48]),
-		FreeBlocks:         be32(buf[48:52]),
-		NextAllocation:     be32(buf[52:56]),
-		RsrcClumpSize:      be32(buf[56:60]),
-		DataClumpSize:      be32(buf[60:64]),
-		NextCatalogID:      be32(buf[64:68]),
-		WriteCount:         be32(buf[68:72]),
-		EncodingsBitmap:    be64(buf[72:80]),
+		Attributes:         be32(buf[volHdrAttributes : volHdrAttributes+4]),
+		LastMountedVersion: be32(buf[volHdrLastMountedVersion : volHdrLastMountedVersion+4]),
+		JournalInfoBlock:   be32(buf[volHdrJournalInfoBlock : volHdrJournalInfoBlock+4]),
+		CreateTime:         hfsTimeToUnix(be32(buf[volHdrCreateDate : volHdrCreateDate+4])),
+		ModifyTime:         hfsTimeToUnix(be32(buf[volHdrModifyDate : volHdrModifyDate+4])),
+		BackupTime:         hfsTimeToUnix(be32(buf[volHdrBackupDate : volHdrBackupDate+4])),
+		CheckedTime:        hfsTimeToUnix(be32(buf[volHdrCheckedDate : volHdrCheckedDate+4])),
+		FileCount:          be32(buf[volHdrFileCount : volHdrFileCount+4]),
+		FolderCount:        be32(buf[volHdrFolderCount : volHdrFolderCount+4]),
+		BlockSize:          be32(buf[volHdrBlockSize : volHdrBlockSize+4]),
+		TotalBlocks:        be32(buf[volHdrTotalBlocks : volHdrTotalBlocks+4]),
+		FreeBlocks:         be32(buf[volHdrFreeBlocks : volHdrFreeBlocks+4]),
+		NextAllocation:     be32(buf[volHdrNextAllocation : volHdrNextAllocation+4]),
+		RsrcClumpSize:      be32(buf[volHdrRsrcClumpSize : volHdrRsrcClumpSize+4]),
+		DataClumpSize:      be32(buf[volHdrDataClumpSize : volHdrDataClumpSize+4]),
+		NextCatalogID:      be32(buf[volHdrNextCatalogID : volHdrNextCatalogID+4]),
+		WriteCount:         be32(buf[volHdrWriteCount : volHdrWriteCount+4]),
+		EncodingsBitmap:    be64(buf[volHdrEncodingsBitmap : volHdrEncodingsBitmap+8]),
 	}
 
-	off := 80
-	for i := 0; i < 8; i++ {
+	off := volHdrFinderInfo
+	for i := range extentRecordCount {
 		hdr.FinderInfo[i] = be32(buf[off : off+4])
 		off += 4
 	}
 
-	hdr.AllocationFile = parseForkData(buf[112:192])
-	hdr.ExtentsFile = parseForkData(buf[192:272])
-	hdr.CatalogFile = parseForkData(buf[272:352])
-	hdr.AttributesFile = parseForkData(buf[352:432])
-	hdr.StartupFile = parseForkData(buf[432:512])
+	hdr.AllocationFile = parseForkData(buf[volHdrAllocationFile : volHdrAllocationFile+forkDataSize])
+	hdr.ExtentsFile = parseForkData(buf[volHdrExtentsFile : volHdrExtentsFile+forkDataSize])
+	hdr.CatalogFile = parseForkData(buf[volHdrCatalogFile : volHdrCatalogFile+forkDataSize])
+	hdr.AttributesFile = parseForkData(buf[volHdrAttributesFile : volHdrAttributesFile+forkDataSize])
+	hdr.StartupFile = parseForkData(buf[volHdrStartupFile : volHdrStartupFile+forkDataSize])
 
 	if hdr.BlockSize == 0 || hdr.TotalBlocks == 0 {
 		return VolumeHeader{}, "", &ParseError{Op: "validate_header", Offset: volumeHeaderOffset, Err: ErrCorrupt}
@@ -169,11 +169,11 @@ func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
 
 func parseForkData(buf []byte) ForkData {
 	var fd ForkData
-	fd.LogicalSize = be64(buf[0:8])
-	fd.ClumpSize = be32(buf[8:12])
-	fd.TotalBlocks = be32(buf[12:16])
-	for i := 0; i < 8; i++ {
-		base := 16 + i*8
+	fd.LogicalSize = be64(buf[forkDataLogicalSize : forkDataLogicalSize+8])
+	fd.ClumpSize = be32(buf[forkDataClumpSize : forkDataClumpSize+4])
+	fd.TotalBlocks = be32(buf[forkDataTotalBlocks : forkDataTotalBlocks+4])
+	for i := range extentRecordCount {
+		base := forkDataExtents + i*extentDescriptorSize
 		fd.Extents[i] = ExtentDescriptor{
 			StartBlock: be32(buf[base : base+4]),
 			BlockCount: be32(buf[base+4 : base+8]),

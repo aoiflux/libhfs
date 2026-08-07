@@ -1,6 +1,9 @@
 package hfs
 
-import "sort"
+import (
+	"context"
+	"sort"
+)
 
 // RecoverySource says where a recovered record was found. The sources differ in
 // reliability, so this is part of the finding, not an implementation detail.
@@ -168,8 +171,24 @@ func (o *RecoveryOptions) orDefaults() *RecoveryOptions {
 // Records are deduplicated across sources by CNID, name and parent; when the
 // same record is found more than once, the highest-confidence instance wins.
 func (v *Volume) WalkDeleted(opts *RecoveryOptions, cb func(DeletedRecord) error) error {
+	return v.WalkDeletedContext(context.Background(), opts, cb)
+}
+
+// WalkDeletedContext is [Volume.WalkDeleted] with cancellation.
+//
+// Unallocated carving reads the whole free area of a volume, which on a large
+// image takes minutes; a caller that cannot wait needs a way out. Cancellation
+// is cooperative and checked between blocks, so it takes effect promptly
+// without abandoning a read in progress. The context's error is returned.
+func (v *Volume) WalkDeletedContext(ctx context.Context, opts *RecoveryOptions, cb func(DeletedRecord) error) error {
 	if cb == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	o := opts.orDefaults()
 
@@ -224,7 +243,7 @@ func (v *Volume) WalkDeleted(opts *RecoveryOptions, cb func(DeletedRecord) error
 		}
 	}
 	if o.ScanUnallocated {
-		if err := v.scanUnallocatedNodes(hdr, emit); err != nil {
+		if err := v.scanUnallocatedNodes(ctx, hdr, emit); err != nil {
 			return err
 		}
 	}
@@ -257,8 +276,13 @@ func (v *Volume) liveRecordKeys() (map[deletedKey]struct{}, error) {
 // RecoverDeleted collects WalkDeleted into a slice, ordered by confidence
 // (highest first) then by CNID.
 func (v *Volume) RecoverDeleted(opts *RecoveryOptions) ([]DeletedRecord, error) {
+	return v.RecoverDeletedContext(context.Background(), opts)
+}
+
+// RecoverDeletedContext is [Volume.RecoverDeleted] with cancellation.
+func (v *Volume) RecoverDeletedContext(ctx context.Context, opts *RecoveryOptions) ([]DeletedRecord, error) {
 	var out []DeletedRecord
-	err := v.WalkDeleted(opts, func(r DeletedRecord) error {
+	err := v.WalkDeletedContext(ctx, opts, func(r DeletedRecord) error {
 		out = append(out, r)
 		return nil
 	})
@@ -411,38 +435,101 @@ func (v *Volume) readNodeBitmap(hdr BTreeHeaderRecord, nodeAt func(uint32, []byt
 // scanUnallocatedNodes carves catalog leaf nodes out of blocks the volume no
 // longer considers allocated.
 //
-// This is the expensive source: it reads every free block. It finds records
-// from a previous incarnation of the catalog file, after the tree has grown and
-// been relocated, which the node-based sources cannot reach.
-func (v *Volume) scanUnallocatedNodes(hdr BTreeHeaderRecord, emit func(DeletedRecord) error) error {
+// This is by far the most expensive source — it reads the whole free area, and
+// measured at roughly 500× a full catalog walk on a 511 MB image, scaling
+// linearly with volume size. It is therefore the one operation in this package
+// that runs concurrently.
+//
+// Parallelism does not change what is found. Each task scans a disjoint span of
+// blocks and returns its own findings; those are concatenated in block order,
+// so the sequence of emitted records is identical at any worker count. See
+// CONCURRENCY.md.
+func (v *Volume) scanUnallocatedNodes(ctx context.Context, hdr BTreeHeaderRecord, emit func(DeletedRecord) error) error {
 	if hdr.NodeSize == 0 || v.header.BlockSize == 0 {
 		return nil
 	}
 
-	nodeSize := int(hdr.NodeSize)
-	buf := make([]byte, v.header.BlockSize)
+	// Collecting the runs first makes the work partitionable and bounds the
+	// scan: everything after this point operates on a fixed set of tasks.
+	var runs []blockRange
+	err := v.WalkUnallocated(func(start, count uint32) error {
+		runs = append(runs, blockRange{start: start, count: count})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
 
-	return v.WalkUnallocated(func(start, count uint32) error {
-		for b := start; b < start+count; b++ {
-			off := v.diskOffset(int64(b) * int64(v.header.BlockSize))
-			if err := readAtExact(v.reader, off, buf); err != nil {
+	tasks := splitBlockRuns(runs, carveBlockBatch)
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	v.mu.RLock()
+	workers := v.carveWorkers
+	v.mu.RUnlock()
+
+	// Each task returns its own findings rather than calling emit, so the
+	// callback stays on the caller's goroutine and needs no synchronisation of
+	// its own.
+	batches, err := parallelMap(ctx, workers, len(tasks),
+		func(ctx context.Context, i int) ([]DeletedRecord, error) {
+			return v.carveBlockRange(ctx, hdr, tasks[i])
+		})
+	if err != nil {
+		return err
+	}
+
+	for _, batch := range batches {
+		for _, rec := range batch {
+			if err := emit(rec); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// carveBlockRange scans one span of allocation blocks for anything that parses
+// as a catalog leaf node, and returns what it finds.
+//
+// It allocates its own buffer so concurrent tasks share nothing but the
+// read-only volume and the io.ReaderAt beneath it.
+func (v *Volume) carveBlockRange(ctx context.Context, hdr BTreeHeaderRecord, span blockRange) ([]DeletedRecord, error) {
+	nodeSize := int(hdr.NodeSize)
+	blockSize := int64(v.header.BlockSize)
+	buf := make([]byte, blockSize)
+
+	var found []DeletedRecord
+	collect := func(rec DeletedRecord) error {
+		found = append(found, rec)
+		return nil
+	}
+
+	for b := span.start; b < span.start+span.count; b++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		off := v.diskOffset(int64(b) * blockSize)
+		if err := readAtExact(v.reader, off, buf); err != nil {
+			// An unreadable block yields nothing; a bad sector must not abort
+			// the scan of everything after it.
+			continue
+		}
+		for pos := 0; pos+nodeSize <= len(buf); pos += nodeSize {
+			candidate := buf[pos : pos+nodeSize]
+			desc, err := parseBTreeNodeDescriptor(candidate)
+			if err != nil || desc.Type != btreeNodeTypeLeaf || desc.NumRecords == 0 {
 				continue
 			}
-			for pos := 0; pos+nodeSize <= len(buf); pos += nodeSize {
-				candidate := buf[pos : pos+nodeSize]
-				desc, err := parseBTreeNodeDescriptor(candidate)
-				if err != nil || desc.Type != btreeNodeTypeLeaf || desc.NumRecords == 0 {
-					continue
-				}
-				for _, rec := range extractNodeRecords(candidate, desc) {
-					if err := v.carveOneRecord(rec, 0, off+int64(pos), RecoveredFromUnallocated, emit); err != nil {
-						return err
-					}
+			for _, rec := range extractNodeRecords(candidate, desc) {
+				if err := v.carveOneRecord(rec, 0, off+int64(pos), RecoveredFromUnallocated, collect); err != nil {
+					return nil, err
 				}
 			}
 		}
-		return nil
-	})
+	}
+	return found, nil
 }
 
 // carveRecords scans a byte span for anything that parses as a catalog record.

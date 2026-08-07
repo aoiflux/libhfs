@@ -91,6 +91,11 @@ type Volume struct {
 	anomalyTotal int
 	textEncoding TextEncoding
 	maxAlloc     int64
+	carveWorkers int
+
+	// codecs holds decmpfs decoders scoped to this volume. It carries its own
+	// lock, so it is not guarded by mu.
+	codecs codecRegistry
 }
 
 type BTreeNodeDescriptor struct {

@@ -1,24 +1,5 @@
 package hfs
 
-// DefaultCacheSize is the number of catalog records a Volume retains by
-// default. Path reconstruction and directory-then-stat traversal both revisit
-// the same records repeatedly, so a small cache removes most of the repeat
-// lookups.
-const DefaultCacheSize = 4096
-
-// DefaultNodeCacheSize is the number of B-tree nodes a Volume retains by
-// default.
-//
-// Every keyed descent re-reads the same root index node, so without this a
-// multi-component path lookup pays for it once per component. Nodes are
-// immutable on a read-only volume, so caching them is always safe.
-const DefaultNodeCacheSize = 128
-
-// maxTrackedAnomalies bounds the anomaly list so a thoroughly corrupt image
-// cannot exhaust memory through reporting alone. AnomalyCount keeps counting
-// past the limit.
-const maxTrackedAnomalies = 1000
-
 // B-tree identifiers, so nodes from different trees cannot collide in the
 // node cache.
 const (
