@@ -290,16 +290,43 @@ func (s *extentsWalkState) readNode(nodeNum uint32) ([]byte, BTreeNodeDescriptor
 	return node, desc, nil
 }
 
+// extractNodeRecords returns the live records of a B-tree node.
+//
+// The offset array holds NumRecords+1 entries. The final entry marks the start
+// of the node's free space, which is NOT a record — it is the region records
+// are deleted into. HFS+ does not zero it, so it routinely still holds an
+// intact copy of a deleted record's bytes. Returning it as a record made
+// deleted files reappear in live directory listings and inflated the volume's
+// file and folder counts; on the corpus image, 36 such regions decoded as
+// valid catalog records.
+//
+// Those bytes are recoverable evidence and are the intended source for
+// node-slack carving (PLAN.md §7, source 5a), but they must be surfaced
+// deliberately through the deleted-record API rather than leaking into live
+// results.
+//
+// The out-of-order and duplicate-offset tolerance below is kept: damaged nodes
+// are normal on forensic images, and salvaging what parses beats discarding the
+// node.
 func extractNodeRecords(node []byte, desc BTreeNodeDescriptor) [][]byte {
 	offs, err := parseNodeRecordOffsets(node, desc.NumRecords)
 	if err != nil {
 		return nil
 	}
-	starts := make([]int, 0, len(offs))
-	seen := make(map[int]struct{}, len(offs))
-	for _, o := range offs {
-		start := int(o)
-		if start < btreeNodeDescSize || start >= len(node)-2 {
+
+	// Records end where free space begins.
+	limit := len(node)
+	if n := int(desc.NumRecords); n < len(offs) {
+		if fo := int(offs[n]); fo >= btreeNodeDescSize && fo <= len(node) {
+			limit = fo
+		}
+	}
+
+	starts := make([]int, 0, desc.NumRecords)
+	seen := make(map[int]struct{}, desc.NumRecords)
+	for i := range int(desc.NumRecords) {
+		start := int(offs[i])
+		if start < btreeNodeDescSize || start >= limit {
 			continue
 		}
 		if _, ok := seen[start]; ok {
@@ -315,11 +342,11 @@ func extractNodeRecords(node []byte, desc BTreeNodeDescriptor) [][]byte {
 
 	out := make([][]byte, 0, len(starts))
 	for i, s := range starts {
-		e := len(node)
+		e := limit
 		if i+1 < len(starts) {
 			e = starts[i+1]
 		}
-		if e <= s || s < 0 || e > len(node) {
+		if e <= s || e > len(node) {
 			continue
 		}
 		out = append(out, node[s:e])

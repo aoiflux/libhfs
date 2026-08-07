@@ -612,12 +612,31 @@ func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 	return nil
 }
 
+// isSystemFile reports whether a catalog name is filesystem metadata rather
+// than user data.
+//
+// The leading-NUL check matters most. Apple names the hard-link and directory-
+// link stores "\x00\x00\x00\x00HFS+ Private Data" and
+// "\x00\x00\x00\x00HFS+ Private Directory Data\r", using NULs and a trailing
+// carriage return specifically so the names cannot be typed. Matching only on a
+// "HFS+" or "." prefix misses them entirely, which left the private-data
+// directory reported as ordinary user content — confirmed on the corpus image,
+// where it appears in the root listing.
 func isSystemFile(name string) bool {
 	if name == "" {
 		return false
 	}
-	// HFS+ system files start with $ or .HFS
-	return name[0] == '$' || strings.HasPrefix(name, ".HFS")
+	if name[0] == 0x00 || name[0] == '$' {
+		return true
+	}
+	if strings.Contains(name, "HFS+ Private") {
+		return true
+	}
+	if strings.HasPrefix(name, ".HFS") {
+		return true
+	}
+	// Journal files live in the root of a journaled volume.
+	return name == ".journal" || name == ".journal_info_block"
 }
 
 func splitPath(p string) []string {

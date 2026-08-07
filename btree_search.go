@@ -7,8 +7,8 @@ import (
 // errSearchDegraded reports that keyed descent could not complete because the
 // tree structure did not permit it — an unreadable node, an unparseable key, a
 // cycle, or a depth blowout. It is never returned to callers: every search
-// entry point falls back to a linear walk when it sees this, so a damaged tree
-// degrades to the pre-v0.3.0 behaviour instead of returning a wrong answer.
+// entry point falls back to an exhaustive linear walk when it sees this, so a
+// damaged tree yields a slower answer rather than a wrong one.
 //
 // Partial corruption is the normal case on forensic images. A search that
 // gives up is worse than a slow search that succeeds.
@@ -63,6 +63,17 @@ func (s *btreeSearcher[K]) readNode(nodeNum uint32) ([]byte, BTreeNodeDescriptor
 		return nil, BTreeNodeDescriptor{}, errSearchDegraded
 	}
 	return node, desc, nil
+}
+
+// isEmpty reports whether the tree holds no records at all.
+//
+// A volume with no overflow extents has an empty extents tree, and one with no
+// extended attributes has an empty attributes tree; both are allocated and
+// formatted but carry no root node. That is ordinary, not corruption, so it
+// must not be reported as a degraded tree — doing so both raised false
+// anomalies and sent every lookup down the linear fallback.
+func (s *btreeSearcher[K]) isEmpty() bool {
+	return s.header.RootNode == 0 || s.header.LeafRecords == 0
 }
 
 // findLeaf descends from the root to the leaf node that would hold target,
@@ -141,6 +152,10 @@ func (s *btreeSearcher[K]) descendIndex(buf []byte, desc BTreeNodeDescriptor, ta
 // following the leaf chain, starting at the first key >= target. cb reports
 // whether to continue; returning false stops the scan cleanly.
 func (s *btreeSearcher[K]) scanFrom(target K, cb func(K, []byte) (bool, error)) error {
+	if s.isEmpty() {
+		return nil
+	}
+
 	leaf, err := s.findLeaf(target)
 	if err != nil {
 		return err

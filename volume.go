@@ -1,58 +1,12 @@
 package hfs
 
+// volume.go holds volume-header parsing and the geometry derived from it.
+// The library's entry point, Open, lives in hfs.go.
+
 import (
 	"errors"
-	"io"
 	"time"
 )
-
-func Open(r io.ReaderAt) (*Volume, error) {
-	if r == nil {
-		return nil, &ParseError{Op: "open", Offset: 0, Err: ErrCorrupt}
-	}
-
-	buf := make([]byte, volumeHeaderSize)
-	if err := readAtExact(r, volumeHeaderOffset, buf); err != nil {
-		return nil, err
-	}
-
-	baseOffset := int64(0)
-	if be16(buf[0:2]) == signatureHFS {
-		embeddedOffset, ok := parseHFSWrapperEmbeddedOffset(buf)
-		if !ok {
-			hdr, hfsBase, err := parseHFSMasterDirectoryBlock(buf)
-			if err != nil {
-				return nil, err
-			}
-			return &Volume{
-				reader:       r,
-				kind:         KindHFS,
-				header:       hdr,
-				baseOffset:   hfsBase,
-				cacheMax:     DefaultCacheSize,
-				nodeCacheMax: DefaultNodeCacheSize,
-			}, nil
-		}
-		if err := readAtExact(r, embeddedOffset+volumeHeaderOffset, buf); err != nil {
-			return nil, err
-		}
-		baseOffset = embeddedOffset
-	}
-
-	hdr, kind, err := parseVolumeHeader(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Volume{
-		reader:       r,
-		kind:         kind,
-		header:       hdr,
-		baseOffset:   baseOffset,
-		cacheMax:     DefaultCacheSize,
-		nodeCacheMax: DefaultNodeCacheSize,
-	}, nil
-}
 
 func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
 	if len(mdb) < volumeHeaderSize {
@@ -265,8 +219,9 @@ func validateVersion(kind FileSystemKind, ver uint16) error {
 // is local. The returned time.Time is labelled UTC in all cases, so CreateTime
 // (and all classic-HFS volume dates) should be read as wall-clock values.
 //
-// Deprecated: use hfsCatalogTime for new code. It distinguishes unset fields
-// from real timestamps and preserves pre-1970 values.
+// Prefer hfsCatalogTime for catalog records: it distinguishes unset fields from
+// real timestamps and preserves pre-1970 values. This function remains only
+// because VolumeHeader's existing output must not change.
 func hfsTimeToUnix(raw uint32) time.Time {
 	if raw <= hfsEpochDeltaSeconds {
 		return time.Unix(0, 0).UTC()

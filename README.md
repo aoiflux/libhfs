@@ -18,10 +18,6 @@ and systems integration.
 go get github.com/aoiflux/libhfs
 ```
 
-## Go Version
-
-- Requires Go 1.25+
-
 ## Quick Start
 
 ```go
@@ -212,8 +208,29 @@ if vol.AnomalyCount() > 0 {
 
 A non-zero `AnomalyCount` is a finding about the volume, not merely a
 performance note: it means part of the filesystem metadata is inconsistent.
-Results remain correct, because the fallback path is the same exhaustive walk
-earlier versions always used.
+Results remain correct, because the fallback path is an exhaustive walk of every
+node in the tree.
+
+## Testing
+
+The default suite is hermetic and runs against synthetic images:
+
+```bash
+go test ./...
+```
+
+Synthetic fixtures are built from the same reading of the format as the parser,
+so they cannot catch a misreading of it. Point the suite at a real raw image to
+run the corpus tier as well:
+
+```bash
+LIBHFS_CORPUS_IMAGE=/path/to/image.dd go test ./...
+```
+
+Those tests reconcile the catalog walk against the volume header's own file and
+folder counts, check keyed lookups against an exhaustive walk for every record,
+round-trip every path, and read every file verifying the byte count against the
+recorded logical size.
 
 ## Error Handling
 

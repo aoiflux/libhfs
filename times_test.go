@@ -293,7 +293,7 @@ func TestVolumeHeaderTimesUnchanged(t *testing.T) {
 	if want := time.Unix(123, 0).UTC(); !got.CreateTime.Equal(want) {
 		t.Errorf("CreateTime = %v, want %v", got.CreateTime, want)
 	}
-	// v0.1.1 clamped unset volume fields to the Unix epoch. That behaviour is
+	// Unset volume fields clamp to the Unix epoch. That behaviour is
 	// deliberately retained so existing callers see no change.
 	if want := time.Unix(0, 0).UTC(); !got.ModifyTime.Equal(want) {
 		t.Errorf("ModifyTime = %v, want %v (clamping behaviour must be preserved)", got.ModifyTime, want)
