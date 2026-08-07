@@ -31,18 +31,22 @@ func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
 	return int64(allocBlockStart512)*512 + int64(embedStartBlock)*int64(allocBlockSize), true
 }
 
-func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, error) {
+// parseHFSMasterDirectoryBlock decodes a classic HFS MDB. It returns the header,
+// the byte offset of the allocation-block area, and the volume bitmap's start
+// sector (drVBMSt), which classic HFS records directly rather than through a
+// fork.
+func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, uint16, error) {
 	if len(mdb) < volumeHeaderSize {
-		return VolumeHeader{}, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrShortRead}
+		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrShortRead}
 	}
 	if be16(mdb[0:2]) != signatureHFS {
-		return VolumeHeader{}, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrInvalidSignature}
+		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrInvalidSignature}
 	}
 
 	blockSize := be32(mdb[hfsMDBOffBlockSize : hfsMDBOffBlockSize+4])
 	totalBlocks := uint32(be16(mdb[hfsMDBOffTotalBlocks : hfsMDBOffTotalBlocks+2]))
 	if blockSize == 0 || totalBlocks == 0 {
-		return VolumeHeader{}, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrCorrupt}
+		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrCorrupt}
 	}
 
 	allocBlockStart512 := be16(mdb[28:30])
@@ -73,7 +77,7 @@ func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, error) {
 	hdr.ExtentsFile = parseHFSForkData(be32(mdb[hfsMDBOffXTFlSize:hfsMDBOffXTFlSize+4]), mdb[hfsMDBOffXTExtRec:hfsMDBOffXTExtRec+12], blockSize)
 	hdr.CatalogFile = parseHFSForkData(be32(mdb[hfsMDBOffCTFlSize:hfsMDBOffCTFlSize+4]), mdb[hfsMDBOffCTExtRec:hfsMDBOffCTExtRec+12], blockSize)
 
-	return hdr, dataBase, nil
+	return hdr, dataBase, be16(mdb[hfsMDBOffVBMStart : hfsMDBOffVBMStart+2]), nil
 }
 
 func parseHFSForkData(logicalSize uint32, extRec []byte, blockSize uint32) ForkData {

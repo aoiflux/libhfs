@@ -3,6 +3,7 @@ package hfs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -603,11 +604,149 @@ func assertNoFallback(t *testing.T, vol *Volume) {
 func buildValidCatalogImage(tb testing.TB) []byte {
 	tb.Helper()
 
+	nodes, nodeSize := buildValidCatalogNodes(tb)
+
+	// One contiguous extent holding the whole tree.
 	const (
 		blockSize         = uint32(4096)
 		catalogStartBlock = uint32(2)
-		nodeSize          = uint16(2048)
-		recordsPerLeaf    = 4
+	)
+	treeBytes := len(nodes) * int(nodeSize)
+	catalogBlocks := uint32((treeBytes + int(blockSize) - 1) / int(blockSize))
+
+	img := make([]byte, int(catalogStartBlock+catalogBlocks)*int(blockSize))
+	writeCatalogVolumeHeader(img, blockSize, uint64(catalogBlocks)*uint64(blockSize), catalogBlocks,
+		[]ExtentDescriptor{{StartBlock: catalogStartBlock, BlockCount: catalogBlocks}})
+
+	base := int(catalogStartBlock * blockSize)
+	for i, node := range nodes {
+		off := base + i*int(nodeSize)
+		copy(img[off:off+int(nodeSize)], node)
+	}
+	return img
+}
+
+// buildFragmentedCatalogImage holds the same tree as buildValidCatalogImage but
+// splits the catalog file across two non-adjacent extents, with a gap of
+// unrelated blocks between them.
+//
+// Addressing nodes from the first extent alone silently reads that gap once the
+// tree crosses the boundary, so every lookup landing in the second half returns
+// garbage. Nothing in a single-extent fixture can catch that, and real volumes
+// fragment their catalog as a matter of course.
+func buildFragmentedCatalogImage(tb testing.TB) []byte {
+	tb.Helper()
+
+	nodes, nodeSize := buildValidCatalogNodes(tb)
+
+	const (
+		blockSize   = uint32(4096)
+		firstStart  = uint32(2)
+		gapBlocks   = uint32(5) // unrelated blocks between the two extents
+		poisonByte  = byte(0xDB)
+		minPerParts = 2
+	)
+
+	treeBytes := len(nodes) * int(nodeSize)
+	totalBlocks := uint32((treeBytes + int(blockSize) - 1) / int(blockSize))
+	if totalBlocks < minPerParts*2 {
+		tb.Fatalf("fixture tree of %d blocks is too small to split meaningfully", totalBlocks)
+	}
+	firstCount := totalBlocks / 2
+	secondCount := totalBlocks - firstCount
+	secondStart := firstStart + firstCount + gapBlocks
+
+	exts := []ExtentDescriptor{
+		{StartBlock: firstStart, BlockCount: firstCount},
+		{StartBlock: secondStart, BlockCount: secondCount},
+	}
+
+	img := make([]byte, int(secondStart+secondCount)*int(blockSize))
+	writeCatalogVolumeHeader(img, blockSize, uint64(totalBlocks)*uint64(blockSize), totalBlocks, exts)
+
+	// Fill the gap with a recognisable pattern. A reader that walks off the end
+	// of the first extent lands here and must not silently succeed.
+	gapStart := int((firstStart + firstCount) * blockSize)
+	gapEnd := int(secondStart * blockSize)
+	for i := gapStart; i < gapEnd; i++ {
+		img[i] = poisonByte
+	}
+
+	// Map each node's logical offset onto the extent list.
+	for i, node := range nodes {
+		logical := int64(i) * int64(nodeSize)
+		if err := writeAtLogicalOffset(img, exts, blockSize, logical, node); err != nil {
+			tb.Fatalf("writing node %d: %v", i, err)
+		}
+	}
+	return img
+}
+
+// writeAtLogicalOffset writes buf at a logical offset within a fork, following
+// the fork's extent list — the inverse of readFromExtents.
+func writeAtLogicalOffset(img []byte, exts []ExtentDescriptor, blockSize uint32, off int64, buf []byte) error {
+	remaining := buf
+	logicalBase := int64(0)
+	cur := off
+
+	for _, e := range exts {
+		extBytes := int64(e.BlockCount) * int64(blockSize)
+		if cur >= logicalBase+extBytes {
+			logicalBase += extBytes
+			continue
+		}
+		inExt := cur - logicalBase
+		can := extBytes - inExt
+		if can > int64(len(remaining)) {
+			can = int64(len(remaining))
+		}
+		phys := int64(e.StartBlock)*int64(blockSize) + inExt
+		copy(img[phys:phys+can], remaining[:can])
+
+		remaining = remaining[can:]
+		cur += can
+		logicalBase += extBytes
+		if len(remaining) == 0 {
+			return nil
+		}
+	}
+	return errShortFixtureWrite
+}
+
+var errShortFixtureWrite = errors.New("fixture: extents too small for the tree")
+
+// writeCatalogVolumeHeader stamps an HFS+ volume header describing a catalog
+// fork with the given extents.
+func writeCatalogVolumeHeader(img []byte, blockSize uint32, logicalSize uint64, totalBlocks uint32, exts []ExtentDescriptor) {
+	vh := img[volumeHeaderOffset : volumeHeaderOffset+volumeHeaderSize]
+	binary.BigEndian.PutUint16(vh[0:2], signatureHFSP)
+	binary.BigEndian.PutUint16(vh[2:4], versionHFSPlus)
+	binary.BigEndian.PutUint32(vh[40:44], blockSize)
+	binary.BigEndian.PutUint32(vh[44:48], 100000)
+	binary.BigEndian.PutUint32(vh[48:52], 50000)
+
+	const catalogForkOff = 272
+	binary.BigEndian.PutUint64(vh[catalogForkOff:catalogForkOff+8], logicalSize)
+	binary.BigEndian.PutUint32(vh[catalogForkOff+12:catalogForkOff+16], totalBlocks)
+	for i, e := range exts {
+		if i >= 8 {
+			break
+		}
+		base := catalogForkOff + 16 + i*8
+		binary.BigEndian.PutUint32(vh[base:base+4], e.StartBlock)
+		binary.BigEndian.PutUint32(vh[base+4:base+8], e.BlockCount)
+	}
+}
+
+// buildValidCatalogNodes builds the catalog B-tree node images, indexed by node
+// number. Physical placement is left to the caller so the same tree can be laid
+// out contiguously or across several extents.
+func buildValidCatalogNodes(tb testing.TB) ([][]byte, uint16) {
+	tb.Helper()
+
+	const (
+		nodeSize       = uint16(2048)
+		recordsPerLeaf = 4
 	)
 
 	type entry struct {
@@ -690,31 +829,12 @@ func buildValidCatalogImage(tb testing.TB) []byte {
 	totalNodes := uint32(2 + len(leaves))
 	lastLeafNum := firstLeafNum + uint32(len(leaves)) - 1
 
-	bytesNeeded := int(totalNodes) * int(nodeSize)
-	catalogBlocks := uint32((bytesNeeded + int(blockSize) - 1) / int(blockSize))
-
-	img := make([]byte, int(catalogStartBlock+catalogBlocks)*int(blockSize))
-	vh := img[volumeHeaderOffset : volumeHeaderOffset+volumeHeaderSize]
-	binary.BigEndian.PutUint16(vh[0:2], signatureHFSP)
-	binary.BigEndian.PutUint16(vh[2:4], versionHFSPlus)
-	binary.BigEndian.PutUint32(vh[40:44], blockSize)
-	binary.BigEndian.PutUint32(vh[44:48], 1000)
-	binary.BigEndian.PutUint32(vh[48:52], 500)
-	binary.BigEndian.PutUint64(vh[272:280], uint64(catalogBlocks)*uint64(blockSize))
-	binary.BigEndian.PutUint32(vh[272+12:272+16], catalogBlocks)
-	binary.BigEndian.PutUint32(vh[272+16:272+20], catalogStartBlock)
-	binary.BigEndian.PutUint32(vh[272+20:272+24], catalogBlocks)
-
-	treeBase := int(catalogStartBlock * blockSize)
-	writeNode := func(num uint32, node []byte) {
-		off := treeBase + int(num)*int(nodeSize)
-		copy(img[off:off+int(nodeSize)], node)
-	}
+	nodes := make([][]byte, totalNodes)
 
 	hdrRec := buildBTreeHeaderRecordBytesAt(nodeSize, totalNodes, indexNodeNum, firstLeafNum)
 	binary.BigEndian.PutUint32(hdrRec[14:18], lastLeafNum)
 	binary.BigEndian.PutUint16(hdrRec[0:2], 2) // depth: index root + leaves
-	writeNode(headerNodeNum, makeNode(nodeSize, btreeNodeTypeHead, [][]byte{hdrRec}))
+	nodes[headerNodeNum] = makeNode(nodeSize, btreeNodeTypeHead, [][]byte{hdrRec})
 
 	// Index root: one record per leaf, key = that leaf's true first key.
 	idxRecords := make([][]byte, 0, len(leaves))
@@ -728,7 +848,7 @@ func buildValidCatalogImage(tb testing.TB) []byte {
 		tb.Fatalf("fixture index node needs %d bytes for %d leaves, exceeds node size %d",
 			idxUsed, len(leaves), nodeSize)
 	}
-	writeNode(indexNodeNum, makeNode(nodeSize, btreeNodeTypeIdx, idxRecords))
+	nodes[indexNodeNum] = makeNode(nodeSize, btreeNodeTypeIdx, idxRecords)
 
 	for i, l := range leaves {
 		node := makeNode(nodeSize, btreeNodeTypeLeaf, l.records)
@@ -738,8 +858,8 @@ func buildValidCatalogImage(tb testing.TB) []byte {
 		if i > 0 {
 			binary.BigEndian.PutUint32(node[4:8], firstLeafNum+uint32(i)-1) // BackwardLink
 		}
-		writeNode(firstLeafNum+uint32(i), node)
+		nodes[firstLeafNum+uint32(i)] = node
 	}
 
-	return img
+	return nodes, nodeSize
 }

@@ -69,9 +69,19 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 		rec.Valence = be32(payload[4:8])
 		rec.CNID = be32(payload[8:12])
 		rec.Times = decodeCatalogTimesHFSPlus(payload)
-		rec.LinkID = be32(payload[44:48])
+		rec.Perms = parseBSDInfo(payload)
+		rec.LinkID = rec.Perms.Special
+		// For folders, userInfo is a FndrDirInfo whose first fields are window
+		// bounds, not a type/creator pair. They are read into FinderType and
+		// FinderCreator for backward compatibility, but the meaningful form for
+		// a folder is the raw FinderInfo block.
 		rec.FinderType = be32(payload[48:52])
 		rec.FinderCreator = be32(payload[52:56])
+		copy(rec.FinderInfo[:], payload[48:80])
+		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, true)
+		if rec.Link == LinkHardDir {
+			rec.LinkTarget = rec.Perms.Special
+		}
 		return rec, nil
 	case catalogRecordFile:
 		if len(payload) < 88 {
@@ -79,9 +89,15 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 		}
 		rec.CNID = be32(payload[8:12])
 		rec.Times = decodeCatalogTimesHFSPlus(payload)
-		rec.LinkID = be32(payload[44:48])
+		rec.Perms = parseBSDInfo(payload)
+		rec.LinkID = rec.Perms.Special
 		rec.FinderType = be32(payload[48:52])
 		rec.FinderCreator = be32(payload[52:56])
+		copy(rec.FinderInfo[:], payload[48:80])
+		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, false)
+		if rec.Link == LinkHardFile {
+			rec.LinkTarget = rec.Perms.Special
+		}
 		if len(payload) >= 168 {
 			rec.DataFork = parseForkData(payload[88:168])
 		}
@@ -113,12 +129,12 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 	}
 }
 
-func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (CatalogRecord, error) {
+func (v *Volume) decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (CatalogRecord, error) {
 	if len(payload) < 1 {
 		return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 	}
 
-	rec := CatalogRecord{ParentCNID: key.ParentCNID, Name: key.NameString()}
+	rec := CatalogRecord{ParentCNID: key.ParentCNID, Name: v.decodeHFSName(key.NameBytes)}
 
 	switch payload[0] {
 	case 0x01: // folder
@@ -139,6 +155,9 @@ func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (C
 		}
 		rec.CNID = be32(payload[20:24])
 		rec.Times = decodeCatalogTimesHFSFile(payload)
+		// filUsrWds (an FInfo) sits at offset 4: fdType then fdCreator.
+		rec.FinderType = be32(payload[4:8])
+		rec.FinderCreator = be32(payload[8:12])
 		dataLogical := uint32(be32(payload[26:30]))
 		dataPhysical := uint32(be32(payload[30:34]))
 		rec.DataFork.LogicalSize = uint64(dataLogical)
@@ -178,7 +197,7 @@ func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (C
 		if 7+nameLen > len(payload) {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
-		rec.Name = string(payload[7 : 7+nameLen])
+		rec.Name = v.decodeHFSName(payload[7 : 7+nameLen])
 		return rec, nil
 	default:
 		return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
@@ -187,7 +206,7 @@ func decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSize uint32) (C
 
 func (v *Volume) decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) {
 	if v != nil && v.kind == KindHFS {
-		return decodeCatalogRecordHFS(key, payload, v.header.BlockSize)
+		return v.decodeCatalogRecordHFS(key, payload, v.header.BlockSize)
 	}
 	return decodeCatalogRecord(key, payload)
 }
@@ -196,13 +215,10 @@ func (r CatalogRecord) hardLinkTargetCNID() uint32 {
 	if r.Type != CatalogRecordFile {
 		return 0
 	}
-	if r.LinkID == 0 {
+	if r.Link != LinkHardFile {
 		return 0
 	}
-	if r.FinderType != hfsHardlinkFileType || r.FinderCreator != hfsHardlinkFileCreator {
-		return 0
-	}
-	return r.LinkID
+	return r.LinkTarget
 }
 
 func (v *Volume) CatalogRecords() ([]CatalogRecord, error) {
@@ -225,6 +241,7 @@ func (v *Volume) WalkCatalog(cb func(CatalogRecord) error) error {
 	err := v.walkCatalogLeafChain(func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
+			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
 		return cb(r)
@@ -282,6 +299,7 @@ func (v *Volume) lookupCNIDViaThread(cnid uint32) (CatalogRecord, error) {
 	err = v.walkCatalogChildren(thr.ParentCNID, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
+			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
 		if r.CNID != cnid {
@@ -334,6 +352,7 @@ func (v *Volume) lookupCNIDLinear(cnid uint32) (CatalogRecord, error) {
 	err := v.walkCatalogBTree(func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
+			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
 		if r.CNID == cnid {
@@ -383,8 +402,16 @@ func (v *Volume) resolveHardLinkRecord(rec CatalogRecord) (CatalogRecord, error)
 		if err != nil {
 			return CatalogRecord{}, err
 		}
+		// The resolved record reports the target's content under the link's
+		// identity. The link facts are carried across rather than discarded, so
+		// a caller can still tell this was reached through a hard link and how
+		// many links share the inode — on the inode, the BSD special field is
+		// the link count.
 		target.Name = rec.Name
 		target.ParentCNID = rec.ParentCNID
+		target.Link = resolved.Link
+		target.LinkTarget = targetCNID
+		target.LinkCount = target.Perms.Special
 		resolved = target
 	}
 }
@@ -468,6 +495,7 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 	err := v.walkCatalogChildren(parent, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
+			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
 		if r.ParentCNID != parent {
@@ -583,6 +611,7 @@ func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 	err = v.walkCatalogChildren(cnid, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
+			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
 		if r.ParentCNID != cnid {
@@ -695,6 +724,7 @@ func (v *Volume) findThreadRecord(targetCNID uint32) (CatalogRecord, error) {
 	err := v.walkCatalogChildren(targetCNID, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
+			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
 		if r.Type != CatalogRecordFolderThread && r.Type != CatalogRecordFileThread {

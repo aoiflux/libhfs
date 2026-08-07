@@ -72,6 +72,12 @@ type Volume struct {
 	// It is zero for non-wrapper volumes.
 	baseOffset int64
 
+	// hfsVBMStart is drVBMSt from a classic HFS MDB: the start of the volume
+	// bitmap, in 512-byte sectors from the volume start. Classic HFS has no
+	// allocation *file*, so the bitmap's location cannot be derived from a
+	// ForkData the way it can on HFS+. Zero on HFS+ and HFSX.
+	hfsVBMStart uint16
+
 	// mu guards every field below it. The fields above are written once during
 	// Open and read-only thereafter, so they need no locking.
 	mu           sync.RWMutex
@@ -83,6 +89,8 @@ type Volume struct {
 	nodeCacheMax int
 	anomalies    []Anomaly
 	anomalyTotal int
+	textEncoding TextEncoding
+	maxAlloc     int64
 }
 
 type BTreeNodeDescriptor struct {
@@ -113,6 +121,12 @@ type CatalogKey struct {
 	KeyLength  uint16
 	ParentCNID uint32
 	NameUTF16  []uint16
+
+	// NameBytes holds the undecoded name for classic HFS keys, whose names are
+	// bytes in a Mac script encoding rather than UTF-16. It is nil for HFS+ and
+	// HFSX. Decoding is deferred to the Volume so the choice of encoding can be
+	// a per-volume setting rather than a parse-time guess.
+	NameBytes []byte
 }
 
 type ExtentsKey struct {
@@ -196,9 +210,48 @@ type CatalogRecord struct {
 	FinderType    uint32
 	FinderCreator uint32
 	Compressed    bool
-	DataFork      ForkData
-	RsrcFork      ForkData
-	Times         CatalogTimes
+
+	// CompressionType is the decmpfs codec identifier when Compressed is true.
+	// It is meaningful even when decompression is unavailable: a caller that
+	// receives ErrUnsupportedCompression can report exactly which codec the
+	// file needed.
+	CompressionType uint32
+
+	DataFork ForkData
+	RsrcFork ForkData
+	Times    CatalogTimes
+
+	// Link classifies this record as a hard link, symlink or ordinary node.
+	// OpenCNID resolves hard links before returning, so a record obtained that
+	// way reports the target's content with the link's identity; use
+	// OpenCNIDRaw to see the link record untouched.
+	Link LinkKind
+
+	// LinkTarget is the inode CNID a hard link points at, or 0.
+	LinkTarget uint32
+
+	// LinkCount is how many hard links share this inode, where known. It is 0
+	// for records that are not hard-link inodes.
+	LinkCount uint32
+
+	// Perms holds POSIX ownership and mode. Zero on classic HFS, which has no
+	// equivalent.
+	Perms BSDInfo
+
+	// FinderInfo is the record's 32 bytes of Finder metadata — userInfo
+	// followed by finderInfo — exposed undecoded. The layout differs between
+	// files and folders, and forensic callers generally want the bytes rather
+	// than an interpretation of them. Zero on classic HFS, whose smaller Finder
+	// fields are surfaced through FinderType and FinderCreator instead.
+	FinderInfo [32]byte
+}
+
+// IsSymlink reports whether this record is a symbolic link.
+func (r CatalogRecord) IsSymlink() bool { return r.Link == LinkSymbolic }
+
+// IsHardLink reports whether this record is a hard link to a file or directory.
+func (r CatalogRecord) IsHardLink() bool {
+	return r.Link == LinkHardFile || r.Link == LinkHardDir
 }
 
 func (r CatalogRecord) IsDirectory() bool {

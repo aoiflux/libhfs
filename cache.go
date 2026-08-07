@@ -146,6 +146,16 @@ func (v *Volume) AnomalyCount() int {
 	return v.anomalyTotal
 }
 
+// noteDecodeFailure records a record that could not be decoded during a walk.
+//
+// These were previously discarded silently, which left a catalog with a large
+// fraction of unreadable records indistinguishable from a clean one. The record
+// is still skipped — a walk must not abort because one entry is damaged — but
+// the caller can now see that it happened.
+func (v *Volume) noteDecodeFailure(op string, parentCNID uint32) {
+	v.noteAnomaly(op, int64(parentCNID), "catalog record failed to decode and was skipped")
+}
+
 // noteAnomaly records a structural inconsistency, deduplicating on (Op,
 // Detail) so a fallback that fires once per file does not flood the list.
 func (v *Volume) noteAnomaly(op string, offset int64, detail string) {

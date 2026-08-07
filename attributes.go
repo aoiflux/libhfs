@@ -1,9 +1,6 @@
 package hfs
 
 import (
-	"bytes"
-	"compress/zlib"
-	"encoding/binary"
 	"errors"
 	"io"
 	"unicode/utf16"
@@ -153,96 +150,86 @@ func (v *Volume) walkAttributesLeafChain(cb func(key attributesKey, payload []by
 	return nil
 }
 
-func (v *Volume) readDecmpfsInline(cnid uint32) ([]byte, uint64, bool, error) {
+// readDecmpfsAttr returns the raw com.apple.decmpfs attribute for a file,
+// along with its parsed header.
+func (v *Volume) readDecmpfsAttr(cnid uint32) (decmpfsHeader, []byte, bool, error) {
 	if v.header.AttributesFile.Extents[0].BlockCount == 0 {
-		return nil, 0, false, nil
+		return decmpfsHeader{}, nil, false, nil
 	}
-	var data []byte
-	var uncSize uint64
+
+	var hdr decmpfsHeader
+	var payload []byte
 	found := false
-	err := v.walkAttributesForFile(cnid, func(key attributesKey, payload []byte) error {
+
+	err := v.walkAttributesForFile(cnid, func(key attributesKey, rec []byte) error {
 		if key.StartBlock != 0 || key.Name != decmpfsAttrName {
 			return nil
 		}
-		if len(payload) < 16 {
+		if len(rec) < attrInlineHeaderSize {
 			return nil
 		}
-		if be32(payload[0:4]) != attrRecordTypeInlineData {
+		if be32(rec[0:4]) != attrRecordTypeInlineData {
 			return nil
 		}
-		attrSize := int(be32(payload[12:16]))
-		if attrSize < decmpfsHeaderSize || 16+attrSize > len(payload) {
+		attrSize := int(be32(rec[12:16]))
+		if attrSize < decmpfsHeaderSize || attrInlineHeaderSize+attrSize > len(rec) {
 			return nil
 		}
-		decoded, size, ok := decodeDecmpfsInline(payload[16 : 16+attrSize])
+		attr := rec[attrInlineHeaderSize : attrInlineHeaderSize+attrSize]
+		h, ok := parseDecmpfsHeader(attr)
 		if !ok {
 			return nil
 		}
-		data = decoded
-		uncSize = size
+		hdr = h
+		payload = append([]byte(nil), attr[decmpfsHeaderSize:]...)
 		found = true
 		return errStopWalk
 	})
 	if errors.Is(err, ErrMissingExtent) {
-		return nil, 0, false, nil
+		return decmpfsHeader{}, nil, false, nil
 	}
 	if err != nil && !errors.Is(err, errStopWalk) {
-		return nil, 0, false, err
+		return decmpfsHeader{}, nil, false, err
 	}
-	return data, uncSize, found, nil
+	return hdr, payload, found, nil
 }
 
-func decodeDecmpfsInline(attr []byte) ([]byte, uint64, bool) {
-	if len(attr) < decmpfsHeaderSize {
-		return nil, 0, false
+// decompressRecord returns the decompressed contents of a decmpfs file.
+func (v *Volume) decompressRecord(rec CatalogRecord) ([]byte, error) {
+	hdr, payload, ok, err := v.readDecmpfsAttr(rec.CNID)
+	if err != nil {
+		return nil, err
 	}
-	cmpType := binary.LittleEndian.Uint32(attr[4:8])
-	uncSize := binary.LittleEndian.Uint64(attr[8:16])
-	raw := attr[16:]
-
-	switch cmpType {
-	case decmpfsTypeRawAttr:
-		if uint64(len(raw)) < uncSize {
-			return nil, 0, false
-		}
-		return append([]byte(nil), raw[:uncSize]...), uncSize, true
-	case decmpfsTypeZlibAttr:
-		if len(raw) == 0 {
-			return nil, 0, false
-		}
-		if raw[0] == 0x0f {
-			if uint64(len(raw)-1) < uncSize {
-				return nil, 0, false
-			}
-			return append([]byte(nil), raw[1:1+uncSize]...), uncSize, true
-		}
-		zr, err := zlib.NewReader(bytes.NewReader(raw))
-		if err != nil {
-			return nil, 0, false
-		}
-		defer zr.Close()
-		out, err := io.ReadAll(zr)
-		if err != nil || uint64(len(out)) != uncSize {
-			return nil, 0, false
-		}
-		return out, uncSize, true
-	default:
-		return nil, 0, false
+	if !ok {
+		return nil, ErrNotFound
 	}
+	if hdr.storedInResourceFork() {
+		return v.decodeResourceForkPayload(hdr, rec)
+	}
+	return v.decodeInlinePayload(hdr, payload)
 }
 
+// hydrateCompressedRecord marks a record as compressed and reports the
+// decompressed size as the data fork's logical size, which is what a caller
+// asking "how big is this file" means.
+//
+// The guard is that the data fork is empty and a decmpfs attribute exists.
+// Testing that *both* forks are empty — as this once did — misses every
+// resource-fork-backed compressed file, since those have a populated resource
+// fork by definition, leaving them reported as zero-length.
 func (v *Volume) hydrateCompressedRecord(rec CatalogRecord) CatalogRecord {
 	if rec.Type != CatalogRecordFile {
 		return rec
 	}
-	if rec.DataFork.LogicalSize != 0 || rec.RsrcFork.LogicalSize != 0 {
+	if rec.DataFork.LogicalSize != 0 {
 		return rec
 	}
-	_, uncSize, ok, err := v.readDecmpfsInline(rec.CNID)
+	hdr, _, ok, err := v.readDecmpfsAttr(rec.CNID)
 	if err != nil || !ok {
 		return rec
 	}
 	rec.Compressed = true
-	rec.DataFork.LogicalSize = uncSize
+	rec.CompressionType = hdr.CompressionType
+	rec.DataFork.LogicalSize = hdr.UncompressedSize
 	return rec
 }

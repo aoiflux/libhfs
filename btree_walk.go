@@ -12,22 +12,11 @@ func (v *Volume) walkCatalogBTree(cb catalogLeafCallback) error {
 		return v.walkCatalogLeafChain(cb)
 	}
 
-	hdr, err := v.CatalogBTreeHeader()
+	state, err := v.newCatalogWalkState()
 	if err != nil {
 		return err
 	}
-	if hdr.NodeSize == 0 {
-		return &ParseError{Op: "walk_catalog_btree", Offset: 0, Err: ErrInvalidBTreeNode}
-	}
-
-	treeStart := v.diskOffset(int64(v.header.CatalogFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
-	state := catalogWalkState{
-		vol:      v,
-		header:   hdr,
-		treeBase: treeStart,
-		visited:  make(map[uint32]struct{}),
-	}
-	return state.walkNode(hdr.RootNode, cb)
+	return state.walkNode(state.header.RootNode, cb)
 }
 
 func (v *Volume) walkExtentsBTree(cb extentsLeafCallback) error {
@@ -35,36 +24,68 @@ func (v *Volume) walkExtentsBTree(cb extentsLeafCallback) error {
 		return v.walkExtentsLeafChain(cb)
 	}
 
-	hdr, err := v.ExtentsBTreeHeader()
+	state, err := v.newExtentsWalkState()
 	if err != nil {
 		return err
 	}
-	if hdr.NodeSize == 0 {
-		return &ParseError{Op: "walk_extents_btree", Offset: 0, Err: ErrInvalidBTreeNode}
-	}
-
-	treeStart := v.diskOffset(int64(v.header.ExtentsFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
-	state := extentsWalkState{
-		vol:      v,
-		header:   hdr,
-		treeBase: treeStart,
-		visited:  make(map[uint32]struct{}),
-	}
-	return state.walkNode(hdr.RootNode, cb)
+	return state.walkNode(state.header.RootNode, cb)
 }
 
+// The walk states address nodes through nodeAt, which maps a node number onto
+// the fork's extent list. Computing offsets from the first extent alone breaks
+// once a tree spans more than one extent (PLAN.md B6).
 type catalogWalkState struct {
-	vol      *Volume
-	header   BTreeHeaderRecord
-	treeBase int64
-	visited  map[uint32]struct{}
+	vol     *Volume
+	header  BTreeHeaderRecord
+	nodeAt  func(uint32, []byte) error
+	visited map[uint32]struct{}
 }
 
 type extentsWalkState struct {
-	vol      *Volume
-	header   BTreeHeaderRecord
-	treeBase int64
-	visited  map[uint32]struct{}
+	vol     *Volume
+	header  BTreeHeaderRecord
+	nodeAt  func(uint32, []byte) error
+	visited map[uint32]struct{}
+}
+
+func (v *Volume) newCatalogWalkState() (*catalogWalkState, error) {
+	hdr, err := v.CatalogBTreeHeader()
+	if err != nil {
+		return nil, err
+	}
+	if hdr.NodeSize == 0 {
+		return nil, &ParseError{Op: "walk_catalog_btree", Offset: 0, Err: ErrInvalidBTreeNode}
+	}
+	nodeAt, err := v.catalogNodeReader(hdr.NodeSize)
+	if err != nil {
+		return nil, err
+	}
+	return &catalogWalkState{
+		vol:     v,
+		header:  hdr,
+		nodeAt:  nodeAt,
+		visited: make(map[uint32]struct{}),
+	}, nil
+}
+
+func (v *Volume) newExtentsWalkState() (*extentsWalkState, error) {
+	hdr, err := v.ExtentsBTreeHeader()
+	if err != nil {
+		return nil, err
+	}
+	if hdr.NodeSize == 0 {
+		return nil, &ParseError{Op: "walk_extents_btree", Offset: 0, Err: ErrInvalidBTreeNode}
+	}
+	nodeAt, err := v.extentsNodeReader(hdr.NodeSize)
+	if err != nil {
+		return nil, err
+	}
+	return &extentsWalkState{
+		vol:     v,
+		header:  hdr,
+		nodeAt:  nodeAt,
+		visited: make(map[uint32]struct{}),
+	}, nil
 }
 
 func (s *catalogWalkState) walkNode(nodeNum uint32, cb catalogLeafCallback) error {
@@ -163,23 +184,12 @@ func (s *extentsWalkState) walkNode(nodeNum uint32, cb extentsLeafCallback) erro
 // without recursing through index nodes. This is O(leaf nodes) instead of
 // O(all nodes) and is used by WalkCatalog for full sequential scans.
 func (v *Volume) walkCatalogLeafChain(cb catalogLeafCallback) error {
-	hdr, err := v.CatalogBTreeHeader()
+	state, err := v.newCatalogWalkState()
 	if err != nil {
 		return err
 	}
-	if hdr.NodeSize == 0 {
-		return &ParseError{Op: "walk_catalog_leaf_chain", Offset: 0, Err: ErrInvalidBTreeNode}
-	}
 
-	treeStart := v.diskOffset(int64(v.header.CatalogFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
-	state := catalogWalkState{
-		vol:      v,
-		header:   hdr,
-		treeBase: treeStart,
-		visited:  make(map[uint32]struct{}),
-	}
-
-	nodeNum := hdr.FirstLeafNode
+	nodeNum := state.header.FirstLeafNode
 	for nodeNum != 0 {
 		if _, ok := state.visited[nodeNum]; ok {
 			break // cycle guard
@@ -210,23 +220,12 @@ func (v *Volume) walkCatalogLeafChain(cb catalogLeafCallback) error {
 }
 
 func (v *Volume) walkExtentsLeafChain(cb extentsLeafCallback) error {
-	hdr, err := v.ExtentsBTreeHeader()
+	state, err := v.newExtentsWalkState()
 	if err != nil {
 		return err
 	}
-	if hdr.NodeSize == 0 {
-		return &ParseError{Op: "walk_extents_leaf_chain", Offset: 0, Err: ErrInvalidBTreeNode}
-	}
 
-	treeStart := v.diskOffset(int64(v.header.ExtentsFile.Extents[0].StartBlock) * int64(v.header.BlockSize))
-	state := extentsWalkState{
-		vol:      v,
-		header:   hdr,
-		treeBase: treeStart,
-		visited:  make(map[uint32]struct{}),
-	}
-
-	nodeNum := hdr.FirstLeafNode
+	nodeNum := state.header.FirstLeafNode
 	for nodeNum != 0 {
 		if _, ok := state.visited[nodeNum]; ok {
 			break
@@ -260,10 +259,8 @@ func (s *catalogWalkState) readNode(nodeNum uint32) ([]byte, BTreeNodeDescriptor
 	if nodeNum >= s.header.TotalNodes {
 		return nil, BTreeNodeDescriptor{}, &ParseError{Op: "read_btree_node", Offset: int64(nodeNum), Err: ErrInvalidBTreeNode}
 	}
-	nodeSize := int(s.header.NodeSize)
-	node := make([]byte, nodeSize)
-	off := s.treeBase + int64(nodeNum)*int64(nodeSize)
-	if err := readAtExact(s.vol.reader, off, node); err != nil {
+	node := make([]byte, s.header.NodeSize)
+	if err := s.nodeAt(nodeNum, node); err != nil {
 		return nil, BTreeNodeDescriptor{}, err
 	}
 	desc, err := parseBTreeNodeDescriptor(node)
@@ -277,10 +274,8 @@ func (s *extentsWalkState) readNode(nodeNum uint32) ([]byte, BTreeNodeDescriptor
 	if nodeNum >= s.header.TotalNodes {
 		return nil, BTreeNodeDescriptor{}, &ParseError{Op: "read_btree_node", Offset: int64(nodeNum), Err: ErrInvalidBTreeNode}
 	}
-	nodeSize := int(s.header.NodeSize)
-	node := make([]byte, nodeSize)
-	off := s.treeBase + int64(nodeNum)*int64(nodeSize)
-	if err := readAtExact(s.vol.reader, off, node); err != nil {
+	node := make([]byte, s.header.NodeSize)
+	if err := s.nodeAt(nodeNum, node); err != nil {
 		return nil, BTreeNodeDescriptor{}, err
 	}
 	desc, err := parseBTreeNodeDescriptor(node)

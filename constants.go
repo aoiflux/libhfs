@@ -22,6 +22,7 @@ const (
 	hfsMDBOffModifyTime    = 6
 	hfsMDBOffAttributes    = 10
 	hfsMDBOffFileCount     = 12
+	hfsMDBOffVBMStart      = 14
 	hfsMDBOffAllocPtr      = 16
 	hfsMDBOffTotalBlocks   = 18
 	hfsMDBOffBlockSize     = 20

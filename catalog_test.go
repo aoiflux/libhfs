@@ -381,7 +381,9 @@ func buildFolderRecord(cnid uint32, valence uint32) []byte {
 }
 
 func buildFileRecord(cnid uint32) []byte {
-	r := make([]byte, 244)
+	// HFSPlusCatalogFile is 248 bytes: the resource fork occupies 168..248, so
+	// a shorter record leaves it unparsed.
+	r := make([]byte, 248)
 	binary.BigEndian.PutUint16(r[0:2], catalogRecordFile)
 	binary.BigEndian.PutUint32(r[8:12], cnid)
 	binary.BigEndian.PutUint64(r[88:96], 1234)

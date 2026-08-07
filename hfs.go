@@ -37,15 +37,21 @@
 //   - [Volume.ReadDir], [Volume.ReadDirCNID], [Volume.WalkDir], [Volume.WalkCatalog]
 //   - [Volume.PathForCNID] reconstructs a path from a CNID
 //   - [Volume.OpenFileByPath], [Volume.OpenFileByCNID] and the
-//     OpenResourceFork equivalents return an [io.ReaderAt] over fork contents
+//     OpenResourceFork equivalents return readers over fork contents
 //   - [Volume.ResolveDataForkExtents] and [Volume.ResolveResourceForkExtents]
 //     expose the on-disk fragments a fork occupies, for callers that need block
 //     addresses rather than bytes
+//   - [Volume.ListXAttrs], [Volume.ReadXAttr] and [Volume.WalkXAttrs] read
+//     extended attributes
+//   - [Volume.RecoverDeleted] and [Volume.WalkDeleted] surface records the
+//     filesystem no longer lists
+//   - [Volume.Capabilities] reports what the volume's format can hold, so
+//     callers branch on a value rather than on [Volume.Kind]
 //
 // # Things that are easy to get wrong
 //
 // Several behaviours matter for forensic use and are not obvious from the
-// signatures alone.
+// signatures alone. FORENSICS.md covers these in more depth.
 //
 // Timestamps. Every [CatalogRecord] carries a [CatalogTimes] holding the MACB
 // set. A zero time.Time means the field was unset on disk — not 1904, and not
@@ -53,13 +59,16 @@
 // before comparing across volumes: HFS+ and HFSX catalog dates are GMT, while
 // classic HFS dates are local wall-clock readings with no offset recorded
 // anywhere on the volume. Classic HFS has no access or attribute-modification
-// date at all. Volume-level dates on [VolumeHeader] follow different rules
-// again: CreateTime is stored in local time while the others are GMT, and unset
-// fields there read back as the Unix epoch rather than a zero time.
+// date at all, which [Volume.Capabilities] reports — that is a property of the
+// format, not a missing value. Volume-level dates on [VolumeHeader] follow
+// different rules again: CreateTime is stored in local time while the others
+// are GMT, and unset fields there read back as the Unix epoch rather than a
+// zero time.
 //
-// Hard links. [Volume.OpenCNID] resolves a hard link to its target inode and
-// reports the target's metadata, matching what stat would show. The record as
-// it literally appears in the catalog is not currently exposed.
+// Links. [Volume.OpenCNID] resolves a hard link to its target inode and reports
+// the target's metadata, matching what stat would show, while keeping the link's
+// name and parent. [CatalogRecord.Link] makes that visible; [Volume.OpenCNIDRaw]
+// returns the link record untouched, which is often what an examiner wants.
 //
 // Damaged volumes. Lookups descend the B-tree by key. When the tree does not
 // permit that — an unreadable node, an unparseable key, or index keys that
@@ -69,15 +78,25 @@
 // is a finding about the volume, not merely a performance note.
 //
 // Deleted data. HFS+ does not zero a B-tree node's free space when a record is
-// deleted, so stale records frequently survive there. This package deliberately
-// excludes that region from live results: a deleted file must never appear in a
-// directory listing. Surfacing those records is the job of a separate recovery
-// API.
+// deleted, so stale records frequently survive there. Those are excluded from
+// live results — a deleted file must never appear in a directory listing — and
+// surfaced only through [Volume.WalkDeleted]. Note that not every record found
+// that way is a deletion: B-tree inserts leave stale copies of records that are
+// still live, and those are filtered out by default. Check
+// [DeletedRecord.Overwritten] before trusting recovered content, since a
+// recovered record's extents are stale pointers.
 //
-// Compression. Files compressed with decmpfs are decompressed transparently
-// when the payload is stored inline in the attribute. Payloads held in the
-// resource fork are not yet decoded; the raw resource fork remains readable via
-// the OpenResourceFork methods in every case.
+// Compression. Files compressed with decmpfs are decompressed transparently,
+// whether the payload sits in the attribute or in the resource fork. zlib and
+// stored payloads are built in; LZVN, LZFSE and LZBITMAP are not in the Go
+// standard library and can be supplied through [RegisterDecompressor]. A file
+// needing an unavailable codec yields [ErrUnsupportedCompression] rather than
+// wrong bytes, and its raw resource fork stays readable through the
+// OpenResourceFork methods so the artifact can still be preserved.
+//
+// Hostile input. Sizes come from the volume, so a corrupt image can declare an
+// enormous fork. [Volume.SetMaxAlloc] caps any single buffer sized from an
+// on-disk field and yields [ErrSizeLimit] instead of attempting the allocation.
 //
 // # Concurrency
 //
@@ -140,8 +159,13 @@ func Open(r io.ReaderAt) (*Volume, error) {
 	if be16(buf[0:2]) == signatureHFS {
 		embeddedOffset, ok := parseHFSWrapperEmbeddedOffset(buf)
 		if !ok {
-			// A plain classic HFS volume: the MDB is the volume header.
-			hdr, hfsBase, err := parseHFSMasterDirectoryBlock(buf)
+			// Either a plain classic HFS volume, or a wrapper whose embedded
+			// extent is unusable. Both are read as classic HFS: the MDB is a
+			// complete, valid volume header in its own right, so the wrapper's
+			// own filesystem is still readable even when the HFS+ volume it
+			// points at is not. Reporting an error instead would discard
+			// recoverable data.
+			hdr, hfsBase, vbmStart, err := parseHFSMasterDirectoryBlock(buf)
 			if err != nil {
 				return nil, err
 			}
@@ -150,8 +174,10 @@ func Open(r io.ReaderAt) (*Volume, error) {
 				kind:         KindHFS,
 				header:       hdr,
 				baseOffset:   hfsBase,
+				hfsVBMStart:  vbmStart,
 				cacheMax:     DefaultCacheSize,
 				nodeCacheMax: DefaultNodeCacheSize,
+				maxAlloc:     DefaultMaxAlloc,
 			}, nil
 		}
 		// An HFS wrapper around an embedded HFS+ volume: re-read the header
@@ -174,5 +200,6 @@ func Open(r io.ReaderAt) (*Volume, error) {
 		baseOffset:   baseOffset,
 		cacheMax:     DefaultCacheSize,
 		nodeCacheMax: DefaultNodeCacheSize,
+		maxAlloc:     DefaultMaxAlloc,
 	}, nil
 }

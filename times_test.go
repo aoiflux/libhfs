@@ -415,12 +415,25 @@ func buildFileRecordWithTimes(cnid uint32, tf timesFixture) []byte {
 // Classic HFS fixture
 // ---------------------------------------------------------------------------
 
-const classicRootValence = uint32(1)
+const (
+	classicRootValence = uint32(2)
+
+	// A name with a high-bit MacRoman byte: "CAF" + 0x8E, which decodes to
+	// "CAFé". Widening the byte instead would yield U+008E, an unprintable
+	// control character.
+	classicAccentedName  = "CAFé"
+	classicAccentedCNID  = uint32(101)
+	classicFinderType    = uint32(0x54455854) // "TEXT"
+	classicFinderCreator = uint32(0x4d505320) // "MPS "
+)
+
+// classicAccentedBytes is the on-disk form of classicAccentedName.
+var classicAccentedBytes = []byte{'C', 'A', 'F', 0x8E}
 
 // buildClassicHFSTimesImage lays out a minimal classic HFS volume: an MDB, and
 // a catalog B-tree of one header node plus one leaf node holding the root
 // folder and a single file.
-func buildClassicHFSTimesImage(t *testing.T) []byte {
+func buildClassicHFSTimesImage(t testing.TB) []byte {
 	t.Helper()
 
 	const (
@@ -456,11 +469,18 @@ func buildClassicHFSTimesImage(t *testing.T) []byte {
 		[][]byte{buildBTreeHeaderRecordBytesAt(nodeSize, totalNodes, leafNode, leafNode)}))
 
 	tf := fullTimesFixture()
-	leafRoot := append(buildCatalogKeyHFS(rootFolderCNID, ""),
+	leafRoot := append(buildCatalogKeyHFSBytes(rootFolderCNID, nil),
 		buildFolderRecordHFS(rootFolderCNID, classicRootValence, tf)...)
-	leafFile := append(buildCatalogKeyHFS(rootFolderCNID, "DATA"),
+	leafFile := append(buildCatalogKeyHFSBytes(rootFolderCNID, []byte("DATA")),
 		buildFileRecordHFS(100, tf)...)
-	writeNode(leafNode, makeNode(nodeSize, btreeNodeTypeLeaf, [][]byte{leafRoot, leafFile}))
+	// A high-bit MacRoman name, to prove decoding rather than byte-widening.
+	leafAccent := append(buildCatalogKeyHFSBytes(rootFolderCNID, classicAccentedBytes),
+		buildFileRecordHFS(classicAccentedCNID, tf)...)
+
+	// Keys must be in on-disk byte order: "" first, then "CAF\x8e" ('C' = 0x43),
+	// then "DATA" ('D' = 0x44).
+	writeNode(leafNode, makeNode(nodeSize, btreeNodeTypeLeaf,
+		[][]byte{leafRoot, leafAccent, leafFile}))
 
 	return img
 }
@@ -469,7 +489,12 @@ func buildClassicHFSTimesImage(t *testing.T) []byte {
 // byte, the parent CNID, then a Str31 name. The record is padded to an even
 // length, matching what parseCatalogKeyHFS expects to skip.
 func buildCatalogKeyHFS(parent uint32, name string) []byte {
-	nameBytes := []byte(name)
+	return buildCatalogKeyHFSBytes(parent, []byte(name))
+}
+
+// buildCatalogKeyHFSBytes takes the name as raw bytes, so a fixture can hold a
+// high-bit MacRoman name that is not valid UTF-8 as a Go string.
+func buildCatalogKeyHFSBytes(parent uint32, nameBytes []byte) []byte {
 	keyLen := 6 + len(nameBytes) // resrv1 + parID + nameLen byte + name
 	total := keyLen + 1
 	if total%2 != 0 {
@@ -501,13 +526,15 @@ func buildFolderRecordHFS(cnid uint32, valence uint32, tf timesFixture) []byte {
 func buildFileRecordHFS(cnid uint32, tf timesFixture) []byte {
 	r := make([]byte, 102)
 	r[0] = 0x02
-	binary.BigEndian.PutUint32(r[20:24], cnid)          // filFlNum
-	binary.BigEndian.PutUint32(r[26:30], 1234)          // filLgLen
-	binary.BigEndian.PutUint32(r[30:34], 4096)          // filPyLen
-	binary.BigEndian.PutUint32(r[44:48], tf.created)    // filCrDat
-	binary.BigEndian.PutUint32(r[48:52], tf.contentMod) // filMdDat
-	binary.BigEndian.PutUint32(r[52:56], tf.backup)     // filBkDat
-	binary.BigEndian.PutUint16(r[74:76], 5)             // filExtRec[0].startBlock
-	binary.BigEndian.PutUint16(r[76:78], 1)             // filExtRec[0].blockCount
+	binary.BigEndian.PutUint32(r[4:8], classicFinderType)     // filUsrWds.fdType
+	binary.BigEndian.PutUint32(r[8:12], classicFinderCreator) // filUsrWds.fdCreator
+	binary.BigEndian.PutUint32(r[20:24], cnid)                // filFlNum
+	binary.BigEndian.PutUint32(r[26:30], 1234)                // filLgLen
+	binary.BigEndian.PutUint32(r[30:34], 4096)                // filPyLen
+	binary.BigEndian.PutUint32(r[44:48], tf.created)          // filCrDat
+	binary.BigEndian.PutUint32(r[48:52], tf.contentMod)       // filMdDat
+	binary.BigEndian.PutUint32(r[52:56], tf.backup)           // filBkDat
+	binary.BigEndian.PutUint16(r[74:76], 5)                   // filExtRec[0].startBlock
+	binary.BigEndian.PutUint16(r[76:78], 1)                   // filExtRec[0].blockCount
 	return r
 }

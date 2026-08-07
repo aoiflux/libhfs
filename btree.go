@@ -95,8 +95,14 @@ func parseCatalogKeyHFS(raw []byte) (CatalogKey, int, error) {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
+	nameBytes := make([]byte, nameLen)
+	copy(nameBytes, body[6:6+nameLen])
+
+	// NameUTF16 keeps the raw byte values so key ordering stays a pure function
+	// of the bytes on disk. The displayed name is decoded separately, per
+	// volume, by decodeHFSName.
 	name := make([]uint16, 0, nameLen)
-	for _, b := range body[6 : 6+nameLen] {
+	for _, b := range nameBytes {
 		name = append(name, uint16(b))
 	}
 
@@ -107,7 +113,12 @@ func parseCatalogKeyHFS(raw []byte) (CatalogKey, int, error) {
 		return CatalogKey{}, 0, &ParseError{Op: "parse_catalog_key_hfs", Offset: 0, Err: ErrInvalidBTreeKey}
 	}
 
-	return CatalogKey{KeyLength: uint16(keyLen), ParentCNID: parent, NameUTF16: name}, total, nil
+	return CatalogKey{
+		KeyLength:  uint16(keyLen),
+		ParentCNID: parent,
+		NameUTF16:  name,
+		NameBytes:  nameBytes,
+	}, total, nil
 }
 
 func parseExtentsKey(raw []byte) (ExtentsKey, int, error) {

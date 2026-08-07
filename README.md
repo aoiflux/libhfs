@@ -78,25 +78,38 @@ Implemented:
 - Inline `com.apple.decmpfs` decompression support (raw + zlib inline payloads)
 - Typed error model using standard Go wrapping (`errors.Is` / `errors.As`)
 
-- Keyed B-tree descent for catalog, extents and attributes lookups
+- Keyed B-tree descent for catalog, extents and attributes lookups, with
+  fragmented B-tree files addressed correctly
 - Safe for concurrent readers, with bounded record and B-tree node caches
+- Extended attributes: listing, reading and whole-volume walking, including
+  fork-backed values spanning extension records
+- decmpfs decompression for inline and resource-fork payloads, with a registry
+  for codecs outside the standard library
+- Deleted-record recovery from B-tree node slack, free nodes and unallocated
+  blocks, with confidence grading and stale-copy filtering
+- POSIX ownership and mode, Finder metadata, hard links and symbolic links
+- Allocation bitmap access
+- Mac OS Roman decoding for classic HFS names
 - Structural anomaly reporting for damaged volumes
+- Allocation guard against implausible on-disk sizes
 
 Current limitations:
 
 - Read-only library (no write or repair operations)
-- Compression support is limited to inline decmpfs attribute payloads
-- Extended attributes are parsed only for decmpfs; no general listing API yet
-- No deleted-record recovery yet
-- Classic HFS lookups still scan the catalog linearly, pending MacRoman
-  collation support
-- B-tree node addressing assumes the catalog and extents files are
-  unfragmented
+- The journal is not read, so pre-commit metadata on a journaled volume is not
+  examined
+- LZVN, LZFSE and LZBITMAP decmpfs codecs are not built in — register your own
+- Resource-fork decompression is implemented from published descriptions and
+  has not been validated against a macOS-produced compressed file
+- ACLs in `com.apple.system.Security` are returned as opaque bytes
+- Classic HFS script encodings other than Mac OS Roman are not decoded
 - Classic HFS carries no extended attributes, access dates, attribute
-  modification dates, hard links or compression — these are properties of the
-  format, not gaps in the parser
+  modification dates, POSIX permissions, hard links or compression — these are
+  properties of the format, not gaps in the parser, and `Capabilities()`
+  reports them
 
-See [PLAN.md](PLAN.md) for the roadmap addressing the above.
+See [FORENSICS.md](FORENSICS.md) for the semantics that matter when this
+output becomes evidence, and [PLAN.md](PLAN.md) for development history.
 
 ## Timestamps
 
@@ -149,10 +162,33 @@ Volume-level:
 - `(*Volume).PathForCNID(cnid uint32) (string, error)`
 - `(*Volume).GetTimes(cnid uint32) (CatalogTimes, error)`
 - `(*Volume).GetTimesByPath(path string) (CatalogTimes, error)`
-- `(*Volume).SetCacheSize(n int)`
-- `(*Volume).SetNodeCacheSize(n int)`
+- `(*Volume).OpenCNIDRaw(cnid uint32) (CatalogRecord, error)`
+- `(*Volume).ReadLink(cnid uint32) (string, error)`
+- `(*Volume).Capabilities() Capabilities`
+- `(*Volume).SetCacheSize(n int)` / `SetNodeCacheSize(n int)` / `SetMaxAlloc(n int64)`
+- `(*Volume).SetTextEncoding(e TextEncoding)`
 - `(*Volume).Anomalies() []Anomaly`
 - `(*Volume).AnomalyCount() int`
+
+Extended attributes:
+
+- `(*Volume).ListXAttrs(cnid uint32) ([]XAttr, error)`
+- `(*Volume).ReadXAttr(cnid uint32, name string) ([]byte, error)`
+- `(*Volume).OpenXAttr(cnid uint32, name string) (*File, error)`
+- `(*Volume).WalkXAttrs(cb func(XAttr) error) error`
+
+Allocation state:
+
+- `(*Volume).BlockAllocated(block uint32) (bool, error)`
+- `(*Volume).WalkUnallocated(cb func(start, count uint32) error) error`
+- `(*Volume).FreeBlockCount() (uint32, error)`
+
+Deleted-record recovery — see [FORENSICS.md](FORENSICS.md) §6 before relying on
+these:
+
+- `(*Volume).RecoverDeleted(opts *RecoveryOptions) ([]DeletedRecord, error)`
+- `(*Volume).WalkDeleted(opts *RecoveryOptions, cb func(DeletedRecord) error) error`
+- `(*Volume).OpenDeleted(rec DeletedRecord) (*File, error)`
 
 File-level:
 

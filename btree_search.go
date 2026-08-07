@@ -364,25 +364,13 @@ func compareAttributesKeys(a, b attributesKey) int {
 
 // supportsKeyedSearch reports whether this volume can be searched by descent.
 //
-// Classic HFS is excluded: its catalog keys collate under a MacRoman ordering
-// this package does not yet model, and its volumes are small enough that the
-// linear walk is tolerable. Phase 2 adds the MacRoman table for both name
-// decoding and collation, at which point this can include KindHFS.
+// Classic HFS qualifies for the same reason HFS+ does: every descent target
+// this package issues carries an empty name, which sorts first under any
+// comparator, so only the parent CNID decides where descent lands. Classic
+// HFS's Mac-script collation therefore never has to be reproduced — see
+// compareCatalogKeys.
 func (v *Volume) supportsKeyedSearch() bool {
-	return v != nil && v.kind != KindHFS
-}
-
-// flatNodeReader addresses B-tree nodes from the first extent of a fork.
-//
-// This mirrors what the existing walkers do. It is only correct while the fork
-// is unfragmented; a catalog or extents file split across several extents will
-// read past the first one. That limitation predates this phase and is tracked
-// in PLAN.md §3.5 rather than being changed here.
-func (v *Volume) flatNodeReader(fork ForkData, nodeSize uint16) func(uint32, []byte) error {
-	base := v.diskOffset(int64(fork.Extents[0].StartBlock) * int64(v.header.BlockSize))
-	return func(nodeNum uint32, dst []byte) error {
-		return readAtExact(v.reader, base+int64(nodeNum)*int64(nodeSize), dst)
-	}
+	return v != nil && v.kind != ""
 }
 
 func (v *Volume) catalogSearcher() (*btreeSearcher[CatalogKey], error) {
@@ -393,15 +381,23 @@ func (v *Volume) catalogSearcher() (*btreeSearcher[CatalogKey], error) {
 	if hdr.NodeSize == 0 {
 		return nil, errSearchDegraded
 	}
+	nodeAt, err := v.catalogNodeReader(hdr.NodeSize)
+	if err != nil {
+		return nil, err
+	}
 	return &btreeSearcher[CatalogKey]{
 		vol:    v,
 		tree:   treeCatalog,
 		header: hdr,
 		ops: keyOps[CatalogKey]{
-			parse:   parseCatalogKey,
+			// Classic HFS keys are length-prefixed bytes, HFS+ keys are
+			// UTF-16 — the descent must parse whichever this volume uses.
+			parse: func(raw []byte) (CatalogKey, int, error) {
+				return parseCatalogKeyForKind(v.kind, raw)
+			},
 			compare: compareCatalogKeys,
 		},
-		nodeAt: v.flatNodeReader(v.header.CatalogFile, hdr.NodeSize),
+		nodeAt: nodeAt,
 	}, nil
 }
 
@@ -413,15 +409,21 @@ func (v *Volume) extentsSearcher() (*btreeSearcher[ExtentsKey], error) {
 	if hdr.NodeSize == 0 {
 		return nil, errSearchDegraded
 	}
+	nodeAt, err := v.extentsNodeReader(hdr.NodeSize)
+	if err != nil {
+		return nil, err
+	}
 	return &btreeSearcher[ExtentsKey]{
 		vol:    v,
 		tree:   treeExtents,
 		header: hdr,
 		ops: keyOps[ExtentsKey]{
-			parse:   parseExtentsKey,
+			parse: func(raw []byte) (ExtentsKey, int, error) {
+				return parseExtentsKeyForKind(v.kind, raw)
+			},
 			compare: compareExtentsKeys,
 		},
-		nodeAt: v.flatNodeReader(v.header.ExtentsFile, hdr.NodeSize),
+		nodeAt: nodeAt,
 	}, nil
 }
 
@@ -433,17 +435,10 @@ func (v *Volume) attributesSearcher() (*btreeSearcher[attributesKey], error) {
 	if hdr.NodeSize == 0 {
 		return nil, errSearchDegraded
 	}
-	// The attributes file is routinely fragmented, so it is read through its
-	// resolved extent list rather than from a flat base.
-	exts, err := v.resolveForkExtentsFromFork(attributesFileCNID, v.header.AttributesFile, extentKeyTypeData)
+	nodeAt, err := v.attributesNodeReader(hdr.NodeSize)
 	if err != nil {
 		return nil, err
 	}
-	blockSize := v.header.BlockSize
-	baseOffset := v.baseOffset
-	reader := v.reader
-	nodeSize := int64(hdr.NodeSize)
-
 	return &btreeSearcher[attributesKey]{
 		vol:    v,
 		tree:   treeAttributes,
@@ -452,9 +447,7 @@ func (v *Volume) attributesSearcher() (*btreeSearcher[attributesKey], error) {
 			parse:   parseAttributesKey,
 			compare: compareAttributesKeys,
 		},
-		nodeAt: func(nodeNum uint32, dst []byte) error {
-			return readFromExtents(reader, exts, blockSize, baseOffset, int64(nodeNum)*nodeSize, dst)
-		},
+		nodeAt: nodeAt,
 	}, nil
 }
 

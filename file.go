@@ -1,6 +1,7 @@
 package hfs
 
 import (
+	"errors"
 	"io"
 )
 
@@ -105,12 +106,21 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	return wrote, nil
 }
 
+// ReadAll reads the whole fork into memory.
+//
+// The buffer is sized from the fork's recorded logical size, so a volume
+// declaring an implausible size is rejected with [ErrSizeLimit] rather than
+// being allowed to exhaust memory. Use [File.ReadAt] with a caller-supplied
+// buffer to stream a fork that is legitimately larger than the cap.
 func (f *File) ReadAll() ([]byte, error) {
 	if f.size == 0 {
 		return []byte{}, nil
 	}
 	if f.size < 0 {
 		return nil, &ParseError{Op: "file_read_all", Offset: f.size, Err: ErrCorrupt}
+	}
+	if err := f.vol.checkAlloc("file_read_all", f.size); err != nil {
+		return nil, err
 	}
 	buf := make([]byte, f.size)
 	n, err := f.ReadAt(buf, 0)
@@ -152,22 +162,39 @@ func (v *Volume) OpenResourceForkByPath(path string) (*File, error) {
 	return v.openFileFromRecord(rec, true)
 }
 
+// openFileFromRecord returns a reader over a record's data or resource fork.
+//
+// Opening the data fork of a compressed file yields its decompressed contents.
+// Opening the resource fork never decompresses, so the raw fork — which is
+// where a compressed file's payload physically lives — is always reachable,
+// including when the codec is unsupported.
 func (v *Volume) openFileFromRecord(rec CatalogRecord, resource bool) (*File, error) {
 	if rec.Type != CatalogRecordFile {
 		return nil, ErrNotFile
 	}
+
 	if !resource {
-		inline, _, ok, err := v.readDecmpfsInline(rec.CNID)
-		if err != nil {
+		data, err := v.decompressRecord(rec)
+		switch {
+		case err == nil:
+			return &File{vol: v, rec: rec, inline: data, size: int64(len(data))}, nil
+		case errors.Is(err, ErrNotFound):
+			// Not a compressed file; fall through to the ordinary fork path.
+		default:
 			return nil, err
 		}
-		if ok {
-			return &File{vol: v, rec: rec, inline: inline, size: int64(len(inline))}, nil
-		}
 	}
+
+	return v.openForkReader(rec, resource)
+}
+
+// openForkReader returns a reader over a fork's raw on-disk contents, with no
+// decompression.
+func (v *Volume) openForkReader(rec CatalogRecord, resource bool) (*File, error) {
 	var exts []ExtentDescriptor
 	var err error
 	var size uint64
+
 	if resource {
 		exts, err = v.ResolveResourceForkExtents(rec.CNID)
 		size = rec.RsrcFork.LogicalSize
@@ -177,6 +204,13 @@ func (v *Volume) openFileFromRecord(rec CatalogRecord, resource bool) (*File, er
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// A logical size above 2^63 would turn negative on conversion. Downstream
+	// code happens to treat a negative size as end-of-file, but relying on that
+	// is fragile; reject it here where the cause is visible.
+	if size > uint64(1)<<62 {
+		return nil, &ParseError{Op: "open_fork", Offset: int64(rec.CNID), Err: ErrCorrupt}
 	}
 	return &File{vol: v, rec: rec, extents: exts, size: int64(size), resource: resource}, nil
 }
