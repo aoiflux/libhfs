@@ -47,10 +47,14 @@ type Report struct {
 	Volume       VolumeSummary `json:"volume"`
 	Capabilities Capabilities  `json:"capabilities"`
 
-	// Anomalies lists the distinct structural inconsistencies observed while
-	// building the report, and AnomalyTotal counts every occurrence including
-	// repeats. A report built without a file listing has seen much less of the
-	// volume, so its anomaly list is correspondingly narrower.
+	// Anomalies lists the distinct structural inconsistencies the volume has
+	// recorded, and AnomalyTotal counts every occurrence including repeats.
+	//
+	// They are read from the volume rather than collected by the report, so
+	// they cover everything since [Open] — including whatever a caller's own
+	// earlier reads provoked — not only what building the report found. A
+	// report built without a file listing walks much less of the volume and so
+	// contributes correspondingly little of its own.
 	Anomalies    []Anomaly `json:"anomalies"`
 	AnomalyTotal int       `json:"anomalyTotal"`
 
@@ -269,7 +273,14 @@ func (v *Volume) fileSummaries(ctx context.Context, cfg ReportOptions) ([]FileSu
 			truncated = true
 			return errReportFull
 		}
-		out = append(out, fileSummary(path, rec, system))
+		// WalkPaths yields decoded records, not hydrated ones, and decmpfs
+		// compression is recorded in an extended attribute rather than in the
+		// catalog. Without this the report calls every compressed file
+		// uncompressed and zero-length — a silent misstatement in the one
+		// artefact meant to be quotable. It costs an attribute lookup only for
+		// a file whose data fork is empty; hydrateCompressedRecord returns
+		// immediately for anything else.
+		out = append(out, fileSummary(path, v.hydrateCompressedRecord(rec), system))
 		return nil
 	})
 	if err != nil && !errors.Is(err, errReportFull) {

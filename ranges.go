@@ -112,6 +112,14 @@ func (v *Volume) ExtentRanges(exts []ExtentDescriptor, logicalSize int64) ([]Byt
 		if span > uint64(math.MaxInt64)-uint64(forkOffset) {
 			return nil, &ParseError{Op: "extent_ranges", Offset: int64(e.StartBlock), Err: ErrCorrupt}
 		}
+		// The range's end must be addressable too, not just its start.
+		// BlockOffset accepts a start close to MaxInt64, and this API promises
+		// that slack begins at DiskOffset+Length; without this check that sum
+		// wraps negative and a caller reads at a negative offset instead of
+		// being told the geometry is corrupt.
+		if span > uint64(math.MaxInt64)-uint64(diskOffset) {
+			return nil, &ParseError{Op: "extent_ranges", Offset: int64(e.StartBlock), Err: ErrCorrupt}
+		}
 
 		data := int64(span)
 		if logicalSize != SizeUnknown {

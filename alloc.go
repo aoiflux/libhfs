@@ -64,7 +64,11 @@ func (v *Volume) WalkUnallocated(cb func(start, count uint32) error) error {
 		return err
 	}
 
-	bitmapBytes := int64((total + bitsPerByte - 1) / bitsPerByte)
+	// Widen before rounding up. total is a uint32, so a volume declaring close
+	// to 2^32 blocks wraps total+7 round to a small number: the loop below then
+	// reads nothing and reports the whole volume as allocated, which is exactly
+	// backwards for a carver looking for free space.
+	bitmapBytes := (int64(total) + bitsPerByte - 1) / bitsPerByte
 	for off := int64(0); off < bitmapBytes; off += bitmapChunkBytes {
 		n := int64(bitmapChunkBytes)
 		if off+n > bitmapBytes {

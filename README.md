@@ -286,8 +286,7 @@ once per directory instead of once per record:
 
 ```go
 err := vol.WalkPaths(func(path string, rec CatalogRecord) error {
-    fmt.Printf("%s	%d	%d
-", path, rec.CNID, rec.DataFork.LogicalSize)
+    fmt.Printf("%s\t%d\t%d\n", path, rec.CNID, rec.DataFork.LogicalSize)
     return nil
 })
 ```

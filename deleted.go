@@ -85,8 +85,19 @@ type DeletedRecord struct {
 	// sources. It is 0 for unallocated carving.
 	NodeNumber uint32
 
-	// ByteOffset is the record's absolute offset in the image — the provenance
-	// an examiner needs to go back to the bytes.
+	// ByteOffset locates the record's bytes. What it is measured from depends
+	// on [DeletedRecord.Source], because the three recovery paths know
+	// different things about where they were looking:
+	//
+	//   - RecoveredFromUnallocated: an absolute offset in the image, directly
+	//     seekable in the reader passed to [Open].
+	//   - RecoveredFromNodeSlack: an offset within the node named by
+	//     NodeNumber, so the bytes are at that node's image offset plus this.
+	//   - RecoveredFromFreeNode: unset. NodeNumber is the provenance; the
+	//     record's position inside the node is not reported.
+	//
+	// Check Source before seeking. Reading an image at a node-relative offset
+	// succeeds and returns unrelated bytes.
 	ByteOffset int64
 
 	// Overwritten reports that at least one block this record's data fork

@@ -226,6 +226,18 @@ func TestExtentRangesRejectsBadGeometry(t *testing.T) {
 		}
 	})
 
+	t.Run("range end overflows int64", func(t *testing.T) {
+		// The start is addressable and the fork-space accumulation fits, but
+		// the range's end in disk space does not. Returning it would hand the
+		// caller a DiskOffset+Length that has wrapped negative, which is the
+		// one arithmetic this API exists to get right.
+		vol := &Volume{header: VolumeHeader{BlockSize: 0x80000000}}
+		huge := []ExtentDescriptor{{StartBlock: 0xFFFFFFFF, BlockCount: 1}}
+		if _, err := vol.ExtentRanges(huge, 1<<31); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("expected ErrCorrupt, got %v", err)
+		}
+	})
+
 	t.Run("extent span overflows int64", func(t *testing.T) {
 		vol := &Volume{header: VolumeHeader{BlockSize: 0xFFFFFFFF}}
 		huge := []ExtentDescriptor{{StartBlock: 1, BlockCount: 0xFFFFFFFF}}

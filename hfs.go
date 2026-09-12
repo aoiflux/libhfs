@@ -42,8 +42,9 @@
 //     expose the on-disk fragments a fork occupies, for callers that need block
 //     addresses rather than bytes
 //   - [Volume.DataForkRanges] and [Volume.ResourceForkRanges] give the same
-//     fragments as image byte offsets, and [Volume.BaseOffset] is the origin
-//     those are measured from
+//     fragments as offsets into the image, ready to read; [Volume.BaseOffset]
+//     is the origin they already account for, for callers converting block
+//     numbers themselves
 //   - [Volume.WalkPaths] enumerates the catalog with each record's path,
 //     sharing the resolution work rather than repeating it per record
 //   - [CatalogRecord.Identity] and [Volume.VolumeIdentifier] give handles for

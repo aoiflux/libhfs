@@ -320,3 +320,28 @@ func TestClassicHFSWalkUnallocatedRuns(t *testing.T) {
 		t.Fatalf("runs = %v, want %v", runs, want)
 	}
 }
+
+// TestBitmapByteCountDoesNotWrap covers the rounding-up arithmetic for a
+// volume declaring close to 2^32 allocation blocks.
+//
+// The count is computed in int64 rather than in the header's uint32 because
+// total+7 wraps there, which would leave the bitmap unread and every block
+// reported as in use. The reader here is far too small to hold such a bitmap,
+// so a correct implementation fails trying to read it; the wrapped one reads
+// nothing at all and reports success.
+func TestBitmapByteCountDoesNotWrap(t *testing.T) {
+	vol := &Volume{
+		reader: bytes.NewReader(make([]byte, 64)),
+		kind:   KindHFS,
+		header: VolumeHeader{BlockSize: 512, TotalBlocks: 0xFFFFFFFF},
+	}
+
+	runs := 0
+	err := vol.WalkUnallocated(func(uint32, uint32) error {
+		runs++
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("WalkUnallocated reported success over a bitmap it could not read, with %d runs", runs)
+	}
+}

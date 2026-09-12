@@ -247,3 +247,49 @@ func TestReportContextCancel(t *testing.T) {
 		t.Fatalf("a summary-only report failed on a cancelled context: %v", err)
 	}
 }
+
+// TestReportDescribesCompressedFiles covers the one place the listing could
+// quietly contradict the rest of the package.
+//
+// WalkPaths yields decoded records, and decmpfs compression is recorded in an
+// extended attribute rather than in the catalog, so a listing built straight
+// from the walk calls every compressed file uncompressed and zero-length.
+func TestReportDescribesCompressedFiles(t *testing.T) {
+	vol := openDecmpfsFixture(t)
+
+	rep, err := vol.Report(&ReportOptions{IncludeFiles: true, MaxFiles: -1})
+	if err != nil {
+		t.Fatalf("Report failed: %v", err)
+	}
+
+	var found *FileSummary
+	for i := range rep.Files {
+		if rep.Files[i].CNID == dcInlineCNID {
+			found = &rep.Files[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("listing has no entry for CNID %d: %+v", dcInlineCNID, rep.Files)
+	}
+
+	// The record the rest of the API hands out for the same file.
+	rec, err := vol.OpenCNID(dcInlineCNID)
+	if err != nil {
+		t.Fatalf("OpenCNID failed: %v", err)
+	}
+
+	if !found.Compressed {
+		t.Error("a decmpfs-compressed file was reported as uncompressed")
+	}
+	if found.CompressionType != rec.CompressionType {
+		t.Errorf("CompressionType = %d, want %d", found.CompressionType, rec.CompressionType)
+	}
+	if found.Size != rec.DataFork.LogicalSize {
+		t.Errorf("Size = %d, want %d (the uncompressed size the package reports elsewhere)",
+			found.Size, rec.DataFork.LogicalSize)
+	}
+	if found.Size == 0 {
+		t.Error("a compressed file was reported as zero-length")
+	}
+}
