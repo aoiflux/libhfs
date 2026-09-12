@@ -60,14 +60,14 @@ func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, uint16, erro
 		CreateTime:     hfsTimeToUnix(be32(mdb[hfsMDBOffCreateTime : hfsMDBOffCreateTime+4])),
 		ModifyTime:     hfsTimeToUnix(be32(mdb[hfsMDBOffModifyTime : hfsMDBOffModifyTime+4])),
 		BackupTime:     hfsTimeToUnix(be32(mdb[hfsMDBOffBackupTime : hfsMDBOffBackupTime+4])),
-		FileCount:      uint32(be16(mdb[hfsMDBOffFileCount : hfsMDBOffFileCount+2])),
-		FolderCount:    uint32(be16(mdb[hfsMDBOffFolderCount : hfsMDBOffFolderCount+2])),
+		FileCount:      be32(mdb[hfsMDBOffFileCount : hfsMDBOffFileCount+4]),
+		FolderCount:    be32(mdb[hfsMDBOffFolderCount : hfsMDBOffFolderCount+4]),
 		BlockSize:      blockSize,
 		TotalBlocks:    totalBlocks,
 		FreeBlocks:     uint32(be16(mdb[hfsMDBOffFreeBlocks : hfsMDBOffFreeBlocks+2])),
 		NextAllocation: uint32(be16(mdb[hfsMDBOffAllocPtr : hfsMDBOffAllocPtr+2])),
 		NextCatalogID:  be32(mdb[hfsMDBOffNextCatalogID : hfsMDBOffNextCatalogID+4]),
-		WriteCount:     uint32(be16(mdb[hfsMDBOffWriteCount : hfsMDBOffWriteCount+2])),
+		WriteCount:     be32(mdb[hfsMDBOffWriteCount : hfsMDBOffWriteCount+4]),
 	}
 
 	for i := range extentRecordCount {

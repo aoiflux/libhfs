@@ -229,6 +229,23 @@ const (
 	hfsFilMinSize = 98
 )
 
+// Classic HFS CatThreadRec.
+//
+// The layout is not the HFS+ one with narrower fields: HFSCatalogThread puts
+// nine reserved bytes after the one-byte record type, so parentID sits at 10
+// and the Str31 name at 14. HFSPlusCatalogThread puts parentID at 4 and the
+// name at 8. Decoding a classic thread at the HFS+ offsets reads reserved
+// zeroes, which yields parent 0 and an empty name — plausible-looking values
+// that quietly break every upward path resolution rather than failing.
+const (
+	hfsThrParID = 10
+	hfsThrCName = 14 // Str31: length byte here, name bytes after it
+
+	// hfsThrMinSize covers the record through the name's length byte. The
+	// record itself is 46 bytes, which bounds a Str31 name at its 31.
+	hfsThrMinSize = hfsThrCName + 1
+)
+
 // Classic HFS catalog key (CatKeyRec) and extents key.
 const (
 	hfsCatKeyReserved   = 0 // within the key body

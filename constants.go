@@ -21,7 +21,6 @@ const (
 	hfsMDBOffCreateTime  = 2
 	hfsMDBOffModifyTime  = 6
 	hfsMDBOffAttributes  = 10
-	hfsMDBOffFileCount   = 12
 	hfsMDBOffVBMStart    = 14
 	hfsMDBOffAllocPtr    = 16
 	hfsMDBOffTotalBlocks = 18
@@ -33,8 +32,14 @@ const (
 	hfsMDBOffFreeBlocks    = 34
 	hfsMDBOffBackupTime    = 64
 	hfsMDBOffWriteCount    = 70
-	hfsMDBOffFolderCount   = 82
-	hfsMDBOffFinderInfo    = 92
+	// hfsMDBOffFileCount and hfsMDBOffFolderCount are drFilCnt and drDirCnt,
+	// the volume-wide totals, and both are 32-bit. They are easy to confuse
+	// with drNmFls (12) and drNmRtDirs (82), which count only what lies in the
+	// root directory and are 16-bit; reading those instead yields a number that
+	// is plausible, small and wrong on every volume with subdirectories.
+	hfsMDBOffFileCount   = 84
+	hfsMDBOffFolderCount = 88
+	hfsMDBOffFinderInfo  = 92
 
 	hfsMDBOffEmbedSigWord = 0x7C
 	hfsMDBOffEmbedExtent  = 0x7E

@@ -2,6 +2,7 @@ package hfs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -186,5 +187,192 @@ func TestClassicHFSValenceAndDates(t *testing.T) {
 	}
 	if root.Times.Source != TimeSourceHFSLocal {
 		t.Errorf("Source = %v, want %v", root.Times.Source, TimeSourceHFSLocal)
+	}
+}
+
+// A classic HFS MDB records four counts that are easy to mistake for one
+// another: drNmFls and drNmRtDirs count only what sits in the root directory
+// and are 16-bit, while drFilCnt and drDirCnt are the volume-wide totals and
+// are 32-bit. Reading the root pair returns a number that is small, plausible
+// and wrong on every volume that has subdirectories, so nothing short of an
+// explicit check catches it — a real volume did, once one was available.
+//
+// The four values here are deliberately all different, and the volume-wide
+// totals deliberately exceed 16 bits, so a parser reading the wrong offset or
+// the wrong width cannot land on the right answer by accident.
+func TestClassicHFSVolumeWideCounts(t *testing.T) {
+	const (
+		rootFiles   = 3
+		rootDirs    = 5
+		fileCount   = 0x0001D4C1 // 120001, needs more than 16 bits
+		folderCount = 0x00012345 // 74565, likewise
+		writeCount  = 0x00ABCDEF // drWrCnt is 32-bit; a 16-bit read sees 0x00AB
+	)
+
+	img := buildClassicHFSTimesImage(t)
+	mdb := img[volumeHeaderOffset : volumeHeaderOffset+volumeHeaderSize]
+	binary.BigEndian.PutUint16(mdb[12:14], rootFiles)
+	binary.BigEndian.PutUint16(mdb[82:84], rootDirs)
+	binary.BigEndian.PutUint32(mdb[84:88], fileCount)
+	binary.BigEndian.PutUint32(mdb[88:92], folderCount)
+	binary.BigEndian.PutUint32(mdb[70:74], writeCount)
+
+	vol, err := Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	h := vol.Header()
+
+	if h.FileCount != fileCount {
+		t.Errorf("FileCount = %d, want drFilCnt %d (drNmFls, the root-only count, is %d)",
+			h.FileCount, fileCount, rootFiles)
+	}
+	if h.FolderCount != folderCount {
+		t.Errorf("FolderCount = %d, want drDirCnt %d (drNmRtDirs, the root-only count, is %d)",
+			h.FolderCount, folderCount, rootDirs)
+	}
+	if h.WriteCount != writeCount {
+		t.Errorf("WriteCount = %d, want drWrCnt %d", h.WriteCount, writeCount)
+	}
+}
+
+// buildThreadRecordHFS builds a classic HFS CatThreadRec (46 bytes).
+//
+// Deliberately written from the HFSCatalogThread layout rather than by
+// narrowing buildThreadRecord's HFS+ one: the two put parentID and the name at
+// different offsets, and a fixture that shared the HFS+ offsets would agree
+// with a decoder that made the same mistake.
+func buildThreadRecordHFS(recType byte, parentCNID uint32, name string) []byte {
+	// Offsets are written as literals, not as the decoder's own constants: a
+	// fixture built from the constants it is checking moves with them and so
+	// agrees with any decoder, however wrong. Per Inside Macintosh: Files,
+	// HFSCatalogThread is cdrType(1), reserved[9], thdParID(4), thdCName(Str31)
+	// — parentID at 10, the name's length byte at 14, 46 bytes in all.
+	r := make([]byte, 46)
+	r[0] = recType
+	binary.BigEndian.PutUint32(r[10:14], parentCNID)
+	r[14] = byte(len(name))
+	copy(r[15:], name)
+	return r
+}
+
+const (
+	// hfsRootParentCNID is kHFSRootParentID: the catalog files the root folder
+	// itself under this parent, and the root's thread names it as the parent.
+	hfsRootParentCNID = uint32(1)
+
+	classicThreadVolName = "threadvol"
+	classicThreadDirName = "docs"
+	classicThreadFileNm  = "notes.txt"
+	classicThreadDirCNID = uint32(16)
+	classicThreadFilCNID = uint32(17)
+)
+
+// buildClassicHFSThreadImage builds a classic HFS volume whose catalog carries
+// a real thread record for every node, with one directory nested inside the
+// root so that resolving the file's path has to climb through two of them.
+//
+// No other fixture in the repo has classic HFS threads: every thread builder
+// writes the HFS+ layout, so a classic thread decoded at HFS+ offsets read
+// reserved zeroes and produced parent 0 with an empty name — values that look
+// like a legitimately unreachable record rather than a parse error.
+func buildClassicHFSThreadImage(tb testing.TB) []byte {
+	tb.Helper()
+
+	const (
+		blockSize         = classicHFSBlockSize
+		catalogStartBlock = uint32(1)
+		nodeSize          = uint16(1024)
+		totalNodes        = uint32(2)
+		leafNode          = uint32(1)
+	)
+
+	dataBase := int(classicHFSDataBase)
+	treeBase := dataBase + int(catalogStartBlock*blockSize)
+	img := make([]byte, treeBase+int(blockSize))
+
+	mdb := img[volumeHeaderOffset : volumeHeaderOffset+volumeHeaderSize]
+	binary.BigEndian.PutUint16(mdb[0:2], signatureHFS)
+	binary.BigEndian.PutUint32(mdb[hfsMDBOffBlockSize:hfsMDBOffBlockSize+4], blockSize)
+	binary.BigEndian.PutUint16(mdb[hfsMDBOffTotalBlocks:hfsMDBOffTotalBlocks+2], 100)
+	binary.BigEndian.PutUint16(mdb[hfsMDBOffFreeBlocks:hfsMDBOffFreeBlocks+2], 90)
+	binary.BigEndian.PutUint16(mdb[hfsMDBOffAlBlSt:hfsMDBOffAlBlSt+2], classicHFSAlBlSt)
+	binary.BigEndian.PutUint32(mdb[hfsMDBOffFileCount:hfsMDBOffFileCount+4], 1)
+	binary.BigEndian.PutUint32(mdb[hfsMDBOffFolderCount:hfsMDBOffFolderCount+4], 1)
+	binary.BigEndian.PutUint32(mdb[hfsMDBOffCTFlSize:hfsMDBOffCTFlSize+4], blockSize)
+	binary.BigEndian.PutUint16(mdb[hfsMDBOffCTExtRec:hfsMDBOffCTExtRec+2], uint16(catalogStartBlock))
+	binary.BigEndian.PutUint16(mdb[hfsMDBOffCTExtRec+2:hfsMDBOffCTExtRec+4], 1)
+
+	tf := fullTimesFixture()
+	join := func(key, rec []byte) []byte { return append(key, rec...) }
+
+	// Catalog key order is parent CNID ascending, then name. The root folder
+	// itself is filed under kHFSRootParentID (1), as a real volume files it.
+	records := [][]byte{
+		join(buildCatalogKeyHFSBytes(hfsRootParentCNID, []byte(classicThreadVolName)),
+			buildFolderRecordHFS(rootFolderCNID, 1, tf)),
+		join(buildCatalogKeyHFSBytes(rootFolderCNID, nil),
+			buildThreadRecordHFS(hfsRecordTypeFolderThread, hfsRootParentCNID, classicThreadVolName)),
+		join(buildCatalogKeyHFSBytes(rootFolderCNID, []byte(classicThreadDirName)),
+			buildFolderRecordHFS(classicThreadDirCNID, 1, tf)),
+		join(buildCatalogKeyHFSBytes(classicThreadDirCNID, nil),
+			buildThreadRecordHFS(hfsRecordTypeFolderThread, rootFolderCNID, classicThreadDirName)),
+		join(buildCatalogKeyHFSBytes(classicThreadDirCNID, []byte(classicThreadFileNm)),
+			buildFileRecordHFS(classicThreadFilCNID, tf)),
+		join(buildCatalogKeyHFSBytes(classicThreadFilCNID, nil),
+			buildThreadRecordHFS(hfsRecordTypeFileThread, classicThreadDirCNID, classicThreadFileNm)),
+	}
+
+	writeNode := func(num uint32, node []byte) {
+		off := treeBase + int(num)*int(nodeSize)
+		copy(img[off:off+int(nodeSize)], node)
+	}
+	writeNode(0, makeNode(nodeSize, btreeNodeTypeHead,
+		[][]byte{buildBTreeHeaderRecordBytesAt(nodeSize, totalNodes, leafNode, leafNode)}))
+	writeNode(leafNode, makeNode(nodeSize, btreeNodeTypeLeaf, records))
+
+	return img
+}
+
+// A classic HFS thread record answers "who is my parent, and what am I called".
+// Both answers come from offsets that differ from the HFS+ ones, and reading
+// the HFS+ offsets yields zero and "" rather than an error, so the only symptom
+// is that every path resolution quietly fails or stops at the root.
+func TestClassicHFSThreadRecords(t *testing.T) {
+	img := buildClassicHFSThreadImage(t)
+	vol, err := Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if vol.Kind() != KindHFS {
+		t.Fatalf("kind = %v, want %v", vol.Kind(), KindHFS)
+	}
+
+	thread, err := vol.findThreadRecord(classicThreadFilCNID)
+	if err != nil {
+		t.Fatalf("findThreadRecord(%d): %v", classicThreadFilCNID, err)
+	}
+	if thread.ParentCNID != classicThreadDirCNID {
+		t.Errorf("thread ParentCNID = %d, want %d", thread.ParentCNID, classicThreadDirCNID)
+	}
+	if thread.Name != classicThreadFileNm {
+		t.Errorf("thread Name = %q, want %q", thread.Name, classicThreadFileNm)
+	}
+
+	wantPath := "/" + classicThreadDirName + "/" + classicThreadFileNm
+	got, err := vol.PathForCNID(classicThreadFilCNID)
+	if err != nil {
+		t.Fatalf("PathForCNID(%d): %v", classicThreadFilCNID, err)
+	}
+	if got != wantPath {
+		t.Errorf("PathForCNID = %q, want %q", got, wantPath)
+	}
+
+	rec, err := vol.OpenPath(wantPath)
+	if err != nil {
+		t.Fatalf("OpenPath(%q): %v", wantPath, err)
+	}
+	if rec.CNID != classicThreadFilCNID {
+		t.Errorf("OpenPath(%q).CNID = %d, want %d", wantPath, rec.CNID, classicThreadFilCNID)
 	}
 }

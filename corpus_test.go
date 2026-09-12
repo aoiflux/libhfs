@@ -1,6 +1,9 @@
 package hfs
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -18,6 +21,18 @@ const corpusEnvVar = "LIBHFS_CORPUS_IMAGE"
 
 func corpusVolume(tb testing.TB) (*Volume, func()) {
 	tb.Helper()
+	vol, _, cleanup := corpusImage(tb)
+	return vol, cleanup
+}
+
+// corpusImage is corpusVolume plus the raw file the volume was opened on.
+//
+// A test that checks a byte offset the library computed must read the image
+// itself to check it. Reading back through the volume would only prove the
+// library agrees with itself, which is the one thing a wrong base offset does
+// not disturb.
+func corpusImage(tb testing.TB) (*Volume, *os.File, func()) {
+	tb.Helper()
 
 	path := os.Getenv(corpusEnvVar)
 	if path == "" {
@@ -32,7 +47,7 @@ func corpusVolume(tb testing.TB) (*Volume, func()) {
 		f.Close()
 		tb.Fatalf("Open(%s): %v", path, err)
 	}
-	return vol, func() { f.Close() }
+	return vol, f, func() { f.Close() }
 }
 
 func TestCorpusOpen(t *testing.T) {
@@ -480,6 +495,214 @@ func BenchmarkCorpusWalkCatalog(b *testing.B) {
 	for b.Loop() {
 		if err := vol.WalkCatalog(func(CatalogRecord) error { return nil }); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// TestCorpusPathsAndRanges is the acceptance test for the physical-addressing
+// and path-resolving APIs against a real volume.
+//
+// Its decisive assertion is the last one: the bytes read straight out of the
+// image at a DiskOffset this package computed must be the file's bytes. Every
+// other check here compares the library with itself and so cannot fail on a
+// wrong base offset, a wrong block size, or an off-by-one extent — all of which
+// return plausible content from elsewhere in the image rather than an error.
+func TestCorpusPathsAndRanges(t *testing.T) {
+	vol, img, cleanup := corpusImage(t)
+	defer cleanup()
+
+	blockSize := int64(vol.Header().BlockSize)
+	base := vol.BaseOffset()
+	t.Logf("baseOffset=%d blockSize=%d", base, blockSize)
+
+	// --- H2: paths ---
+
+	var walked []PathRecord
+	var roots, orphans int
+	if err := vol.WalkPaths(func(path string, rec CatalogRecord) error {
+		walked = append(walked, PathRecord{Path: path, Record: rec})
+		switch {
+		case rec.CNID == rootFolderCNID:
+			roots++
+			if path != "/" {
+				t.Errorf("root emitted as %q, want %q", path, "/")
+			}
+		case path == "":
+			orphans++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkPaths: %v", err)
+	}
+
+	h := vol.Header()
+	wantRecords := int(h.FileCount) + int(h.FolderCount) + 1 // +1: root, which folderCount excludes
+	t.Logf("walked %d paths (%d orphans); header implies %d live records", len(walked), orphans, wantRecords)
+
+	if len(walked) != wantRecords {
+		t.Errorf("WalkPaths emitted %d records, want %d", len(walked), wantRecords)
+	}
+	if roots != 1 {
+		t.Errorf("root emitted %d times, want once", roots)
+	}
+	if orphans != 0 {
+		t.Errorf("%d orphaned records on a healthy volume", orphans)
+	}
+
+	for _, pr := range walked {
+		if pr.Record.CNID == rootFolderCNID {
+			continue
+		}
+		want, err := vol.PathForCNID(pr.Record.CNID)
+		if err != nil {
+			t.Errorf("PathForCNID(%d): %v", pr.Record.CNID, err)
+			continue
+		}
+		if pr.Path != want {
+			t.Errorf("CNID %d: WalkPaths says %q, PathForCNID says %q", pr.Record.CNID, pr.Path, want)
+		}
+	}
+
+	// The slice sibling must agree with the walk it wraps, in order.
+	slice, err := vol.PathRecords()
+	if err != nil {
+		t.Fatalf("PathRecords: %v", err)
+	}
+	if len(slice) != len(walked) {
+		t.Errorf("PathRecords returned %d records, WalkPaths emitted %d", len(slice), len(walked))
+	} else {
+		for i := range slice {
+			if slice[i].Path != walked[i].Path || slice[i].Record.CNID != walked[i].Record.CNID {
+				t.Errorf("PathRecords[%d] = (%q, %d), walk gave (%q, %d)",
+					i, slice[i].Path, slice[i].Record.CNID, walked[i].Path, walked[i].Record.CNID)
+				break
+			}
+		}
+	}
+
+	// --- H1: ranges ---
+
+	imgSize, err := img.Stat()
+	if err != nil {
+		t.Fatalf("stat image: %v", err)
+	}
+	imageLen := imgSize.Size()
+
+	var checked, compressed, empty, multiExtent int
+	var dataBytes, slackBytes int64
+
+	for _, pr := range walked {
+		rec := pr.Record
+		if rec.Type != CatalogRecordFile {
+			continue
+		}
+
+		ranges, err := vol.DataForkRanges(rec.CNID)
+		if err != nil {
+			t.Errorf("DataForkRanges(%d, %q): %v", rec.CNID, pr.Path, err)
+			continue
+		}
+
+		// A decmpfs file keeps its content in an attribute, so it has no data
+		// fork to address even though OpenFileByCNID returns bytes for it.
+		if rec.Compressed {
+			compressed++
+			if len(ranges) != 0 {
+				t.Errorf("compressed file %q returned %d data-fork ranges, want none", pr.Path, len(ranges))
+			}
+			continue
+		}
+		if rec.DataFork.LogicalSize == 0 {
+			empty++
+			if len(ranges) != 0 {
+				t.Errorf("empty file %q returned %d ranges, want none", pr.Path, len(ranges))
+			}
+			continue
+		}
+		if len(ranges) == 0 {
+			t.Errorf("file %q has LogicalSize %d but no ranges", pr.Path, rec.DataFork.LogicalSize)
+			continue
+		}
+		if len(ranges) > 1 {
+			multiExtent++
+		}
+
+		var wantForkOffset, sumLength int64
+		for i, r := range ranges {
+			if r.ForkOffset != wantForkOffset {
+				t.Errorf("%q range %d: ForkOffset %d, want %d", pr.Path, i, r.ForkOffset, wantForkOffset)
+			}
+			if got, want := r.AllocatedLength(), int64(r.BlockCount)*blockSize; got != want {
+				t.Errorf("%q range %d: Length+Slack = %d, want BlockCount*BlockSize = %d", pr.Path, i, got, want)
+			}
+			if want := base + int64(r.StartBlock)*blockSize; r.DiskOffset != want {
+				t.Errorf("%q range %d: DiskOffset %d, want base+block = %d", pr.Path, i, r.DiskOffset, want)
+			}
+			if r.DiskOffset < 0 || r.DiskOffset+r.AllocatedLength() > imageLen {
+				t.Errorf("%q range %d: [%d,%d) falls outside the %d-byte image",
+					pr.Path, i, r.DiskOffset, r.DiskOffset+r.AllocatedLength(), imageLen)
+			}
+			switch alloc, err := vol.BlockAllocated(r.StartBlock); {
+			case err != nil:
+				t.Errorf("%q range %d: BlockAllocated(%d): %v", pr.Path, i, r.StartBlock, err)
+			case !alloc:
+				t.Errorf("%q range %d: start block %d is not marked allocated", pr.Path, i, r.StartBlock)
+			}
+			wantForkOffset += r.AllocatedLength()
+			sumLength += r.Length
+			slackBytes += r.Slack
+		}
+		if sumLength != int64(rec.DataFork.LogicalSize) {
+			t.Errorf("%q: ranges cover %d data bytes, LogicalSize is %d", pr.Path, sumLength, rec.DataFork.LogicalSize)
+		}
+
+		// The decisive check: assemble the file from the raw image using only
+		// the offsets this package returned, and compare with what the fork
+		// reader produces. These two disagree the moment the base offset, the
+		// block size or the extent walk is wrong.
+		raw := sha256.New()
+		for _, r := range ranges {
+			if r.Length == 0 {
+				continue
+			}
+			if _, err := io.CopyN(raw, io.NewSectionReader(img, r.DiskOffset, r.Length), r.Length); err != nil {
+				t.Errorf("%q: raw read at %d: %v", pr.Path, r.DiskOffset, err)
+				raw = nil
+				break
+			}
+		}
+		if raw == nil {
+			continue
+		}
+
+		fh, err := vol.OpenFileByCNID(rec.CNID)
+		if err != nil {
+			t.Errorf("OpenFileByCNID(%d): %v", rec.CNID, err)
+			continue
+		}
+		via := sha256.New()
+		if _, err := io.Copy(via, fh); err != nil {
+			t.Errorf("%q: read through the fork reader: %v", pr.Path, err)
+			continue
+		}
+		if !bytes.Equal(raw.Sum(nil), via.Sum(nil)) {
+			t.Errorf("%q (cnid %d): bytes read at the returned DiskOffsets differ from the fork reader's",
+				pr.Path, rec.CNID)
+		}
+
+		checked++
+		dataBytes += sumLength
+	}
+
+	t.Logf("verified %d files against the raw image (%d data bytes, %d slack bytes); %d multi-extent, %d compressed, %d empty",
+		checked, dataBytes, slackBytes, multiExtent, compressed, empty)
+
+	if checked == 0 {
+		t.Fatal("no file was read back from the raw image; the test proved nothing")
+	}
+	if n := vol.AnomalyCount(); n != 0 {
+		for _, a := range vol.Anomalies() {
+			t.Errorf("anomaly: %s @%d: %s", a.Op, a.Offset, a.Detail)
 		}
 	}
 }

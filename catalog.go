@@ -183,22 +183,23 @@ func (v *Volume) decodeCatalogRecordHFS(key CatalogKey, payload []byte, blockSiz
 		}
 		copy(rec.RsrcFork.Extents[:], rsrcExtents)
 		return rec, nil
-	case 0x03, 0x04: // folder/file thread
-		if payload[0] == 0x03 {
+	case hfsRecordTypeFolderThread, hfsRecordTypeFileThread:
+		if payload[0] == hfsRecordTypeFolderThread {
 			rec.Type = CatalogRecordFolderThread
 		} else {
 			rec.Type = CatalogRecordFileThread
 		}
-		if len(payload) < 7 {
+		if len(payload) < hfsThrMinSize {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
 		rec.ThreadCNID = key.ParentCNID
-		rec.ParentCNID = be32(payload[2:6])
-		nameLen := int(payload[6])
-		if 7+nameLen > len(payload) {
+		rec.ParentCNID = be32(payload[hfsThrParID : hfsThrParID+4])
+		nameLen := int(payload[hfsThrCName])
+		nameAt := hfsThrCName + 1
+		if nameAt+nameLen > len(payload) {
 			return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}
 		}
-		rec.Name = v.decodeHFSName(payload[7 : 7+nameLen])
+		rec.Name = v.decodeHFSName(payload[nameAt : nameAt+nameLen])
 		return rec, nil
 	default:
 		return CatalogRecord{}, &ParseError{Op: "decode_catalog_record_hfs", Offset: 0, Err: ErrCorrupt}

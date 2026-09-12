@@ -102,6 +102,13 @@ func TestCorpusBSDInfoPopulated(t *testing.T) {
 	vol, cleanup := corpusVolume(t)
 	defer cleanup()
 
+	// HFSCatalogFile and HFSCatalogFolder carry no permissions field, so a
+	// classic HFS volume has no POSIX metadata to find and all-zero modes are
+	// the correct answer rather than a symptom.
+	if vol.Kind() == KindHFS {
+		t.Skip("classic HFS records carry no BSD info")
+	}
+
 	var total, zeroMode, regular, dirs, symlinks, hardLinks int
 	owners := map[uint32]int{}
 
