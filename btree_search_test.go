@@ -749,41 +749,36 @@ func buildValidCatalogNodes(tb testing.TB) ([][]byte, uint16) {
 		recordsPerLeaf = 4
 	)
 
-	type entry struct {
-		key []byte
-		rec []byte
-	}
-
-	var entries []entry
+	var entries []catalogEntry
 
 	// Records must be emitted in B-tree key order: parent CNID ascending, then
 	// name. CNIDs are assigned so that ordering by parent puts the root's
 	// parent first, then root, then the directories, then the file threads.
 	//
 	// (1, volname) -> the root folder record itself.
-	entries = append(entries, entry{
+	entries = append(entries, catalogEntry{
 		key: buildCatalogKey(1, validTreeVolName),
 		rec: buildFolderRecord(rootFolderCNID, validTreeDirCount),
 	})
 	// (2, "") -> root's thread, then (2, dirNN) -> the directory records.
-	entries = append(entries, entry{
+	entries = append(entries, catalogEntry{
 		key: buildCatalogKey(rootFolderCNID, ""),
 		rec: buildThreadRecord(catalogRecordFolderThread, 1, validTreeVolName),
 	})
 	for d := range validTreeDirCount {
-		entries = append(entries, entry{
+		entries = append(entries, catalogEntry{
 			key: buildCatalogKey(rootFolderCNID, validTreeDirName(d)),
 			rec: buildFolderRecord(validTreeDirCNID(d), validTreeFilesPerDir),
 		})
 	}
 	// Per directory: its own thread, then its file records.
 	for d := range validTreeDirCount {
-		entries = append(entries, entry{
+		entries = append(entries, catalogEntry{
 			key: buildCatalogKey(validTreeDirCNID(d), ""),
 			rec: buildThreadRecord(catalogRecordFolderThread, rootFolderCNID, validTreeDirName(d)),
 		})
 		for f := range validTreeFilesPerDir {
-			entries = append(entries, entry{
+			entries = append(entries, catalogEntry{
 				key: buildCatalogKey(validTreeDirCNID(d), validTreeFileName(f)),
 				rec: buildFileRecord(validTreeFileCNID(d, f)),
 			})
@@ -792,12 +787,34 @@ func buildValidCatalogNodes(tb testing.TB) ([][]byte, uint16) {
 	// Finally every file's thread record, keyed on its own CNID.
 	for d := range validTreeDirCount {
 		for f := range validTreeFilesPerDir {
-			entries = append(entries, entry{
+			entries = append(entries, catalogEntry{
 				key: buildCatalogKey(validTreeFileCNID(d, f), ""),
 				rec: buildThreadRecord(catalogRecordFileThread, validTreeDirCNID(d), validTreeFileName(f)),
 			})
 		}
 	}
+
+	return packCatalogTree(tb, entries, nodeSize, recordsPerLeaf)
+}
+
+// catalogEntry is one catalog record with the key it is filed under, in the
+// form packCatalogTree expects.
+type catalogEntry struct {
+	key []byte
+	rec []byte
+}
+
+// packCatalogTree lays a key-ordered run of catalog entries out as a header
+// node, an index root and a chain of leaves, and returns the node images
+// indexed by node number.
+//
+// The entries must already be in B-tree key order — parent CNID ascending, then
+// name — because nothing here sorts them, and a fixture that is out of order
+// tests the degraded full-scan path rather than the keyed descent it looks like
+// it is testing. Physical placement is left to the caller so the same tree can
+// be laid out contiguously or across several extents.
+func packCatalogTree(tb testing.TB, entries []catalogEntry, nodeSize uint16, recordsPerLeaf int) ([][]byte, uint16) {
+	tb.Helper()
 
 	// Pack into leaves, remembering each leaf's first key for the index node.
 	type leaf struct {
