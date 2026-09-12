@@ -145,6 +145,11 @@ func TestCorpusBSDInfoPopulated(t *testing.T) {
 	if total == 0 {
 		t.Fatal("no records")
 	}
+	// A volume that has never been mounted carries no POSIX metadata at all:
+	// mkfs.hfsplus leaves the root folder's mode, owner and group zero, and
+	// the mounting OS fills them in later. On such an image every assertion
+	// below is the correct answer rather than a symptom.
+	skipEmptyCorpus(t, vol, "POSIX metadata")
 	if zeroMode == total {
 		t.Error("every record has a zero file mode; the BSDInfo offset is likely wrong")
 	}

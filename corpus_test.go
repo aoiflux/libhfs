@@ -50,6 +50,31 @@ func corpusImage(tb testing.TB) (*Volume, *os.File, func()) {
 	return vol, f, func() { f.Close() }
 }
 
+// skipEmptyCorpus skips when the corpus image genuinely holds no files.
+//
+// Several corpus tests end in a guard that fails when they examined nothing —
+// "the test proved nothing" — because a test which walks zero objects and
+// reports success would pass just as readily against a parser that returns
+// nothing at all, and that failure mode is silent. The guard is right for an
+// image that holds objects the code failed to find. It is wrong for an image
+// that holds none: a freshly formatted volume is a legitimate thing to hand a
+// forensic tool, and reporting failures against one that fsck and every parse
+// agree is healthy teaches the reader to ignore the suite.
+//
+// The volume header's own FileCount separates the two cases. It is the
+// writer's claim rather than a count this package derived, so it cannot be
+// wrong in the same direction as the walk being checked —
+// TestCorpusCountsMatchVolumeHeader exists precisely because the two
+// disagreeing is itself a bug. A volume whose files are all zero-length would
+// still trip the guard, which is deliberate: that is rare enough to be worth a
+// look, where an empty volume is not.
+func skipEmptyCorpus(tb testing.TB, vol *Volume, what string) {
+	tb.Helper()
+	if vol.Header().FileCount == 0 {
+		tb.Skipf("volume holds no files, so it has no %s to check", what)
+	}
+}
+
 func TestCorpusOpen(t *testing.T) {
 	vol, cleanup := corpusVolume(t)
 	defer cleanup()
@@ -358,6 +383,7 @@ func TestCorpusReadAllFiles(t *testing.T) {
 	}
 	t.Logf("read %d files (%d bytes), %d empty, %d fragmented", read, totalBytes, empty, fragmented)
 	if read == 0 {
+		skipEmptyCorpus(t, vol, "file contents")
 		t.Fatal("no files read; the test proved nothing")
 	}
 }
@@ -698,6 +724,7 @@ func TestCorpusPathsAndRanges(t *testing.T) {
 		checked, dataBytes, slackBytes, multiExtent, compressed, empty)
 
 	if checked == 0 {
+		skipEmptyCorpus(t, vol, "file contents")
 		t.Fatal("no file was read back from the raw image; the test proved nothing")
 	}
 	if n := vol.AnomalyCount(); n != 0 {

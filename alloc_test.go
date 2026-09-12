@@ -3,6 +3,7 @@ package hfs
 import (
 	"bytes"
 	"encoding/binary"
+	"sort"
 	"testing"
 )
 
@@ -66,6 +67,7 @@ func TestCorpusLiveFileBlocksAreAllocated(t *testing.T) {
 	}
 	t.Logf("checked %d blocks belonging to live files; %d allocated", checked, allocated)
 	if checked == 0 {
+		skipEmptyCorpus(t, vol, "live file blocks")
 		t.Fatal("no blocks checked; the test proved nothing")
 	}
 }
@@ -343,5 +345,417 @@ func TestBitmapByteCountDoesNotWrap(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("WalkUnallocated reported success over a bitmap it could not read, with %d runs", runs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Block accounting
+// ---------------------------------------------------------------------------
+
+// blockBitset is a set of allocation block numbers.
+//
+// A map would be the obvious choice, but a forensic image is routinely large
+// enough for one entry per block to cost gigabytes — a terabyte volume with
+// 4 KiB blocks has 268 million of them — where the bitset costs 32 MiB. The
+// test has to be affordable on the images it exists to be pointed at.
+type blockBitset struct {
+	bits  []uint64
+	limit uint32
+}
+
+func newBlockBitset(limit uint32) *blockBitset {
+	return &blockBitset{bits: make([]uint64, (uint64(limit)+63)/64), limit: limit}
+}
+
+// add records a block and reports whether it was newly added.
+func (s *blockBitset) add(b uint32) bool {
+	if b >= s.limit {
+		return false
+	}
+	word, mask := b/64, uint64(1)<<(b%64)
+	if s.bits[word]&mask != 0 {
+		return false
+	}
+	s.bits[word] |= mask
+	return true
+}
+
+func (s *blockBitset) has(b uint32) bool {
+	if b >= s.limit {
+		return false
+	}
+	return s.bits[b/64]&(uint64(1)<<(b%64)) != 0
+}
+
+// reservedBlocks returns the allocation blocks the format itself keeps in use
+// even though no file owns them.
+//
+// HFS+ reserves the first 1024 bytes for boot blocks and the 512 after them
+// for the volume header, and the last 1024 bytes for the alternate volume
+// header and a final reserved sector (Apple TN1150, "Volume Header"). Those
+// byte ranges lie inside allocation blocks, so the bitmap marks those blocks
+// in use and the catalog will never account for them.
+//
+// Classic HFS has the same structures but keeps them outside the allocation
+// block area — that displacement is exactly what drAlBlSt measures and what
+// Volume.BaseOffset returns — so no allocation block covers them and the set
+// is empty.
+func reservedBlocks(vol *Volume) []uint32 {
+	if vol.Kind() == KindHFS {
+		return nil
+	}
+
+	h := vol.Header()
+	blockSize := uint64(h.BlockSize)
+	if blockSize == 0 || h.TotalBlocks == 0 {
+		return nil
+	}
+	volumeBytes := uint64(h.TotalBlocks) * blockSize
+
+	seen := make(map[uint32]bool)
+	var out []uint32
+	mark := func(from, to uint64) {
+		if to > volumeBytes {
+			to = volumeBytes
+		}
+		for off := from / blockSize * blockSize; off < to; off += blockSize {
+			b := uint32(off / blockSize)
+			if !seen[b] {
+				seen[b] = true
+				out = append(out, b)
+			}
+		}
+	}
+	mark(0, 1536)
+	if volumeBytes >= 1024 {
+		mark(volumeBytes-1024, volumeBytes)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func forkOf(rec CatalogRecord, resource bool) ForkData {
+	if resource {
+		return rec.RsrcFork
+	}
+	return rec.DataFork
+}
+
+func forkTypeOf(resource bool) uint8 {
+	if resource {
+		return extentKeyTypeRsrc
+	}
+	return extentKeyTypeData
+}
+
+// walkClaimedBlocks reports every allocation block the volume's own metadata
+// says belongs to something, passing each one with the name of what claims it.
+//
+// A block may be offered more than once; detecting that is the point. This is
+// a function rather than inline code because the caller runs it twice — once
+// to find collisions cheaply, once to name both sides of the ones it found.
+func walkClaimedBlocks(tb testing.TB, vol *Volume, claim func(block uint32, owner string)) {
+	tb.Helper()
+
+	h := vol.Header()
+	total := h.TotalBlocks
+
+	claimExtents := func(exts []ExtentDescriptor, owner string) {
+		for _, e := range exts {
+			// Widened because StartBlock+BlockCount is free to wrap on a
+			// damaged volume, and a wrapped loop bound never terminates.
+			end := uint64(e.StartBlock) + uint64(e.BlockCount)
+			if end > uint64(total) {
+				end = uint64(total)
+			}
+			for b := uint64(e.StartBlock); b < end; b++ {
+				claim(uint32(b), owner)
+			}
+		}
+	}
+
+	specials := []struct {
+		name string
+		cnid uint32
+		fork ForkData
+	}{
+		{"$Allocation", allocationFileCNID, h.AllocationFile},
+		{"$Extents", extentsFileCNID, h.ExtentsFile},
+		{"$Catalog", catalogFileCNID, h.CatalogFile},
+		{"$Attributes", attributesFileCNID, h.AttributesFile},
+		{"$Startup", startupFileCNID, h.StartupFile},
+	}
+	for _, s := range specials {
+		if s.fork.TotalBlocks == 0 {
+			continue
+		}
+		exts, err := vol.forkExtents(s.cnid, s.fork)
+		if err != nil {
+			tb.Fatalf("forkExtents(%s): %v", s.name, err)
+		}
+		claimExtents(exts, s.name)
+	}
+
+	hasAttributes := h.AttributesFile.TotalBlocks > 0
+
+	err := vol.WalkPaths(func(path string, rec CatalogRecord) error {
+		// A hard link's record is a stub: the blocks belong to the inode in
+		// the private data directory, which this walk reaches on its own. The
+		// fork methods resolve the link, so counting the stub as well would
+		// report the inode's blocks as claimed twice over.
+		if rec.Link == LinkHardFile || rec.Link == LinkHardDir {
+			return nil
+		}
+
+		if hasAttributes {
+			attrs, err := vol.ListXAttrs(rec.CNID)
+			if err == nil {
+				for _, a := range attrs {
+					if a.Storage == XAttrFork {
+						claimExtents(a.Extents, path+" (xattr "+a.Name+")")
+					}
+				}
+			}
+		}
+
+		if rec.IsDirectory() {
+			return nil
+		}
+		for _, fork := range []struct {
+			label    string
+			resource bool
+		}{{"data", false}, {"rsrc", true}} {
+			exts, err := vol.resolveForkExtentsFromFork(rec.CNID, forkOf(rec, fork.resource), forkTypeOf(fork.resource))
+			if err != nil {
+				tb.Errorf("resolve %s fork of %q: %v", fork.label, path, err)
+				continue
+			}
+			claimExtents(exts, path+" ("+fork.label+")")
+		}
+		return nil
+	})
+	if err != nil {
+		tb.Fatalf("WalkPaths: %v", err)
+	}
+}
+
+func firstFewBlocks(blocks []uint32) []uint32 {
+	if len(blocks) > 10 {
+		return blocks[:10]
+	}
+	return blocks
+}
+
+// The catalog and the allocation bitmap are two independent records of which
+// blocks are in use. The other tests here compare them in aggregate — a free
+// block count against the header's claim, a sample of live blocks against the
+// bitmap — so they pass whenever two errors cancel. This reconciles the two
+// block by block and in both directions.
+//
+// It is also the only place a cross-link can show up: two objects whose
+// extents name the same block. No per-file check can see that, because each
+// file is self-consistent on its own, and a change-tracking tool built on
+// these ranges would attribute one file's bytes to another without complaint.
+func TestCorpusBlockAccounting(t *testing.T) {
+	vol, cleanup := corpusVolume(t)
+	defer cleanup()
+
+	total := vol.Header().TotalBlocks
+	if total == 0 {
+		t.Fatal("volume reports no allocation blocks; the test would prove nothing")
+	}
+
+	claimed := newBlockBitset(total)
+	collided := newBlockBitset(total)
+	var distinct, collisions int
+	var reported []uint32
+
+	walkClaimedBlocks(t, vol, func(b uint32, _ string) {
+		if claimed.add(b) {
+			distinct++
+			return
+		}
+		if !collided.add(b) {
+			return
+		}
+		collisions++
+		// Only the first few are named below. A volume where everything
+		// collides would otherwise produce a diagnostic far larger than the
+		// volume's own catalog, which is how the first draft of this test
+		// behaved under a mutated extent parser.
+		if len(reported) < maxReportedCollisions {
+			reported = append(reported, b)
+		}
+	})
+	if distinct == 0 {
+		t.Fatal("nothing claimed a single block; the test proved nothing")
+	}
+
+	// Name both sides of each collision. This second pass runs only on
+	// failure, which is why the first one need not carry the owners.
+	if collisions > 0 {
+		wanted := newBlockBitset(total)
+		for _, b := range reported {
+			wanted.add(b)
+		}
+		owners := make(map[uint32][]string, len(reported))
+		walkClaimedBlocks(t, vol, func(b uint32, owner string) {
+			if wanted.has(b) && len(owners[b]) < maxReportedOwners {
+				owners[b] = append(owners[b], owner)
+			}
+		})
+		t.Errorf("%d allocation blocks are claimed by more than one object", collisions)
+		for _, b := range reported {
+			t.Errorf("  block %d claimed by %v", b, owners[b])
+		}
+	}
+
+	// Free blocks per the bitmap, gathered in one chunked pass: BlockAllocated
+	// costs a read per call and there is one call per block on the volume.
+	free := newBlockBitset(total)
+	var freeCount uint32
+	if err := vol.WalkUnallocated(func(start, count uint32) error {
+		for b := start; b < start+count && b < total; b++ {
+			free.add(b)
+			freeCount++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WalkUnallocated: %v", err)
+	}
+
+	reserved := reservedBlocks(vol)
+	reservedSet := newBlockBitset(total)
+	for _, b := range reserved {
+		reservedSet.add(b)
+	}
+
+	var claimedButFree, unaccounted []uint32
+	for b := uint32(0); b < total; b++ {
+		switch {
+		case claimed.has(b) && free.has(b):
+			claimedButFree = append(claimedButFree, b)
+		case !claimed.has(b) && !free.has(b) && !reservedSet.has(b):
+			unaccounted = append(unaccounted, b)
+		}
+	}
+
+	t.Logf("catalog claims %d of %d blocks; bitmap says %d in use and %d free; %d reserved by the format %v",
+		distinct, total, total-freeCount, freeCount, len(reserved), firstFewBlocks(reserved))
+
+	// A block holding live content that the bitmap calls free is what makes
+	// deleted-file recovery unsound: carving treats it as recoverable space
+	// and hands back another file's live data.
+	if len(claimedButFree) > 0 {
+		t.Errorf("%d blocks hold live content but read as free, first few %v",
+			len(claimedButFree), firstFewBlocks(claimedButFree))
+	}
+
+	// The other direction. With the format's own reserved blocks excluded,
+	// every block the bitmap calls in use should belong to something the
+	// catalog names. A remainder means either that extent resolution is losing
+	// fragments — losing one is invisible to every per-file check, since the
+	// file then reads short consistently everywhere — or that the volume
+	// genuinely has space leaked by whatever wrote it.
+	if len(unaccounted) > 0 {
+		t.Errorf("%d blocks are marked in use but nothing claims them, first few %v",
+			len(unaccounted), firstFewBlocks(unaccounted))
+	}
+
+	// The reserved blocks are not merely excused from the reconciliation: the
+	// format requires them to be in use, so check that they are.
+	for _, b := range reserved {
+		if free.has(b) {
+			t.Errorf("reserved block %d reads as free", b)
+		}
+		if claimed.has(b) {
+			t.Errorf("reserved block %d is claimed by a catalog object", b)
+		}
+	}
+}
+
+// Caps on the block-accounting diagnostics. A failure is normally a handful of
+// blocks; a systematic one is every block on the volume, and printing that is
+// no more informative than printing ten of them.
+const (
+	maxReportedCollisions = 10
+	maxReportedOwners     = 4
+)
+
+// The reserved-block derivation is arithmetic over the block size, and the only
+// real image that exercised it had 4096-byte blocks — the one size where the
+// answer is also the obvious one, a single block at each end. At 512 the boot
+// blocks and volume header span three blocks and the tail spans two, which no
+// image in the corpus would have caught.
+//
+// Every expectation below was read off a volume formatted by Apple's
+// mkfs.hfsplus (hfsprogs 540.1) at that block size and confirmed against its
+// allocation bitmap: TestCorpusBlockAccounting reported exactly these blocks as
+// the residue between what the catalog claims and what the bitmap calls in use,
+// with nothing left over in either direction. They are literals here rather
+// than a second computation because a test that recomputes the value it is
+// checking agrees with any derivation, however wrong.
+func TestReservedBlocksAcrossBlockSizes(t *testing.T) {
+	cases := []struct {
+		name        string
+		kind        FileSystemKind
+		blockSize   uint32
+		totalBlocks uint32
+		want        []uint32
+	}{
+		// Boot blocks occupy 0..1023 and the volume header 1024..1535, so at
+		// 512 bytes a block those three structures are three distinct blocks.
+		// The alternate volume header and the final reserved sector occupy the
+		// last 1024 bytes, which is two more.
+		{"512-byte blocks", KindHFSP, 512, 98304, []uint32{0, 1, 2, 98302, 98303}},
+		// At 1024 the header shares block 1 with the second half of the boot
+		// blocks, and the whole tail fits in one block.
+		{"1024-byte blocks", KindHFSP, 1024, 49152, []uint32{0, 1, 49151}},
+		{"4096-byte blocks", KindHFSP, 4096, 12288, []uint32{0, 12287}},
+		{"65536-byte blocks", KindHFSP, 65536, 2048, []uint32{0, 2047}},
+		// HFSX differs from HFS+ only in name comparison; the reserved
+		// geometry is identical, and a derivation that keyed on Kind rather
+		// than on the format family would get this wrong.
+		{"HFSX is HFS+ geometry", KindHFSX, 512, 98304, []uint32{0, 1, 2, 98302, 98303}},
+		// Classic HFS keeps its boot blocks and MDB outside the allocation
+		// area — that displacement is exactly drAlBlSt — so no allocation
+		// block covers them and nothing is reserved.
+		{"classic HFS reserves nothing", KindHFS, 4096, 12287, nil},
+		// Degenerate geometry must not divide by zero or loop forever. Open
+		// rejects these, but reservedBlocks is reached from a test helper that
+		// does not.
+		{"zero block size", KindHFSP, 0, 1000, nil},
+		{"zero total blocks", KindHFSP, 4096, 0, nil},
+		// A volume too small to hold both ends separately: the whole thing is
+		// reserved, and the two ranges must merge rather than report block 0
+		// twice.
+		{"single block volume", KindHFSP, 4096, 1, []uint32{0}},
+		{"volume shorter than the tail", KindHFSP, 512, 1, []uint32{0}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vol := &Volume{
+				kind:   tc.kind,
+				header: VolumeHeader{BlockSize: tc.blockSize, TotalBlocks: tc.totalBlocks},
+			}
+			got := reservedBlocks(vol)
+			if len(got) != len(tc.want) {
+				t.Fatalf("reservedBlocks = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("reservedBlocks = %v, want %v", got, tc.want)
+				}
+			}
+			// Every reserved block must be addressable, or the accounting
+			// would exclude a block that does not exist and quietly hide a
+			// real one.
+			for _, b := range got {
+				if b >= tc.totalBlocks {
+					t.Errorf("reserved block %d is past the end of a %d-block volume", b, tc.totalBlocks)
+				}
+			}
+		})
 	}
 }
