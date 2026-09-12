@@ -2,6 +2,7 @@ package hfs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -206,4 +207,116 @@ func isSizeLimit(err error) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Classic HFS bitmap addressing
+// ---------------------------------------------------------------------------
+
+const (
+	// classicVBMStart is drVBMSt: the bitmap begins at sector 3, immediately
+	// after the MDB and comfortably before the allocation-block area the
+	// classic fixture starts at sector 4.
+	classicVBMStart = uint16(3)
+
+	// classicBitmapTotalBlocks matches drNmAlBlks in buildClassicHFSTimesImage.
+	classicBitmapTotalBlocks = uint32(100)
+
+	// classicBitmapAllocated is how many blocks the pattern below marks in use.
+	classicBitmapAllocated = 9
+)
+
+// buildClassicHFSBitmapImage adds a real volume bitmap to the classic fixture,
+// and fills the first allocation block with 0xFF.
+//
+// The fill is the point of the fixture. drVBMSt and drAlBlSt are both measured
+// from the start of the volume, so code that adds the allocation-block base to
+// the bitmap offset lands inside the allocation-block area instead of on the
+// bitmap. Making that area say "everything is allocated" while the bitmap says
+// otherwise turns a silent misread into a failed assertion.
+func buildClassicHFSBitmapImage(t testing.TB) []byte {
+	t.Helper()
+
+	img := buildClassicHFSTimesImage(t)
+
+	mdb := img[volumeHeaderOffset : volumeHeaderOffset+volumeHeaderSize]
+	binary.BigEndian.PutUint16(mdb[hfsMDBOffVBMStart:hfsMDBOffVBMStart+2], classicVBMStart)
+
+	// Blocks 0-7 in use, block 8 in use, everything after it free.
+	bitmap := int(classicVBMStart) * hfsSectorSize
+	img[bitmap] = 0xFF
+	img[bitmap+1] = 0x80
+
+	allocArea := int(classicHFSDataBase)
+	for i := allocArea; i < allocArea+int(classicHFSBlockSize) && i < len(img); i++ {
+		img[i] = 0xFF
+	}
+	return img
+}
+
+// TestClassicHFSBitmapOffset is the regression test for the bitmap address:
+// the volume bitmap is found from the volume start, not from the
+// allocation-block area that [Volume.BaseOffset] reports.
+func TestClassicHFSBitmapOffset(t *testing.T) {
+	vol, err := Open(bytes.NewReader(buildClassicHFSBitmapImage(t)))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if vol.Kind() != KindHFS {
+		t.Fatalf("fixture opened as %s, want %s", vol.Kind(), KindHFS)
+	}
+	// The premise of the fixture: the two offsets really are different, so
+	// adding them really would read the wrong bytes.
+	if vol.BaseOffset() == 0 {
+		t.Fatal("fixture has a zero base offset; it cannot distinguish the two addressings")
+	}
+
+	for _, tc := range []struct {
+		block uint32
+		want  bool
+	}{
+		{0, true}, {7, true}, {8, true},
+		{9, false}, {50, false}, {99, false},
+	} {
+		got, err := vol.BlockAllocated(tc.block)
+		if err != nil {
+			t.Fatalf("BlockAllocated(%d) failed: %v", tc.block, err)
+		}
+		if got != tc.want {
+			t.Fatalf("BlockAllocated(%d) = %v, want %v — the bitmap was read from the wrong offset",
+				tc.block, got, tc.want)
+		}
+	}
+
+	free, err := vol.FreeBlockCount()
+	if err != nil {
+		t.Fatalf("FreeBlockCount failed: %v", err)
+	}
+	if want := classicBitmapTotalBlocks - classicBitmapAllocated; free != want {
+		t.Fatalf("FreeBlockCount = %d, want %d", free, want)
+	}
+}
+
+// TestClassicHFSWalkUnallocatedRuns checks that the run boundaries the carver
+// depends on come out of the same correctly addressed bitmap.
+func TestClassicHFSWalkUnallocatedRuns(t *testing.T) {
+	vol, err := Open(bytes.NewReader(buildClassicHFSBitmapImage(t)))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	type run struct{ start, count uint32 }
+	var runs []run
+	err = vol.WalkUnallocated(func(start, count uint32) error {
+		runs = append(runs, run{start, count})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkUnallocated failed: %v", err)
+	}
+
+	want := []run{{9, classicBitmapTotalBlocks - classicBitmapAllocated}}
+	if len(runs) != len(want) || runs[0] != want[0] {
+		t.Fatalf("runs = %v, want %v", runs, want)
+	}
 }

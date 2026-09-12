@@ -418,6 +418,12 @@ func buildFileRecordWithTimes(cnid uint32, tf timesFixture) []byte {
 const (
 	classicRootValence = uint32(2)
 
+	// Geometry of the classic fixture, hoisted so that other fixtures built on
+	// top of it address the same volume rather than a drifting copy of it.
+	classicHFSBlockSize = uint32(4096)
+	classicHFSAlBlSt    = uint16(4)
+	classicHFSDataBase  = int64(classicHFSAlBlSt) * hfsSectorSize
+
 	// A name with a high-bit MacRoman byte: "CAF" + 0x8E, which decodes to
 	// "CAFé". Widening the byte instead would yield U+008E, an unprintable
 	// control character.
@@ -437,15 +443,15 @@ func buildClassicHFSTimesImage(t testing.TB) []byte {
 	t.Helper()
 
 	const (
-		blockSize         = uint32(4096)
-		alBlSt            = uint16(4) // allocation blocks start at byte 2048
+		blockSize         = classicHFSBlockSize
+		alBlSt            = classicHFSAlBlSt // allocation blocks start at byte 2048
 		catalogStartBlock = uint32(1)
 		nodeSize          = uint16(512)
 		totalNodes        = uint32(2)
 		leafNode          = uint32(1)
 	)
 
-	dataBase := int(alBlSt) * 512
+	dataBase := int(classicHFSDataBase)
 	treeBase := dataBase + int(catalogStartBlock*blockSize)
 	img := make([]byte, treeBase+int(blockSize))
 

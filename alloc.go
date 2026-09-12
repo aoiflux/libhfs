@@ -130,7 +130,15 @@ func (v *Volume) readBitmapAt(off int64, dst []byte) error {
 	if v.kind == KindHFS {
 		// Classic HFS stores the volume bitmap at drVBMSt, a 512-byte-sector
 		// offset from the start of the volume, rather than in a fork.
-		return readAtExact(v.reader, v.baseOffset+v.hfsBitmapOffset()+off, dst)
+		//
+		// baseOffset is deliberately not added. On classic HFS it is
+		// drAlBlSt*512, the start of the allocation-block area, and drVBMSt is
+		// measured from the same origin — the start of the volume, which for a
+		// volume read as classic HFS is always offset zero in the reader. The
+		// bitmap sits before the allocation-block area, between it and the MDB,
+		// so adding the two would skip past the bitmap into file data and
+		// silently report another file's bytes as allocation state.
+		return readAtExact(v.reader, v.hfsBitmapOffset()+off, dst)
 	}
 
 	exts, err := v.forkExtents(allocationFileCNID, v.header.AllocationFile)
