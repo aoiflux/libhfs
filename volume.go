@@ -5,6 +5,7 @@ package hfs
 
 import (
 	"errors"
+	"math"
 	"time"
 )
 
@@ -104,6 +105,58 @@ func (v *Volume) diskOffset(rel int64) int64 {
 		return rel
 	}
 	return v.baseOffset + rel
+}
+
+// BaseOffset returns the image byte offset that allocation block 0 maps to.
+//
+// Every block number this package reports — in an [ExtentDescriptor], from
+// [Volume.WalkUnallocated], on a [DeletedRecord] — is an allocation block
+// number, and the byte it begins at is
+//
+//	BaseOffset() + int64(block)*int64(Header().BlockSize)
+//
+// That formula holds on all three formats, which is the only reason a single
+// accessor is meaningful. It is zero for a plain HFS+ or HFSX volume at the
+// start of the reader. For an HFS wrapper carrying an embedded HFS+ volume it
+// is where the embedded volume begins, because the embedded volume numbers its
+// blocks from there. For classic HFS it is drAlBlSt*512, the start of the
+// allocation-block area rather than the start of the volume, because classic
+// HFS numbers allocation block 0 from there and not from sector 0 — a volume
+// offset would be wrong by the MDB and the bitmap on every read.
+//
+// Prefer [Volume.BlockOffset] to repeating the arithmetic; it rejects the
+// geometry that makes it overflow.
+//
+// Safe for concurrent use.
+func (v *Volume) BaseOffset() int64 {
+	if v == nil {
+		return 0
+	}
+	return v.baseOffset
+}
+
+// BlockOffset returns the image byte offset of an allocation block.
+//
+// It reports [ErrCorrupt] when the volume declares a zero block size, and when
+// the product would exceed the range of an int64 — a corrupt header can declare
+// a block size of 4 GiB, and 2^32 blocks of it do not fit in the offset type an
+// io.ReaderAt takes.
+//
+// Safe for concurrent use.
+func (v *Volume) BlockOffset(block uint32) (int64, error) {
+	if v == nil {
+		return 0, &ParseError{Op: "block_offset", Offset: int64(block), Err: ErrCorrupt}
+	}
+	blockSize := uint64(v.header.BlockSize)
+	if blockSize == 0 {
+		return 0, &ParseError{Op: "block_offset", Offset: int64(block), Err: ErrCorrupt}
+	}
+
+	rel := uint64(block) * blockSize
+	if rel > uint64(math.MaxInt64)-uint64(v.baseOffset) {
+		return 0, &ParseError{Op: "block_offset", Offset: int64(block), Err: ErrCorrupt}
+	}
+	return v.baseOffset + int64(rel), nil
 }
 
 func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {

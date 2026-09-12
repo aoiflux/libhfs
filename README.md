@@ -89,6 +89,13 @@ Implemented:
   blocks, with confidence grading and stale-copy filtering
 - POSIX ownership and mode, Finder metadata, hard links and symbolic links
 - Allocation bitmap access
+- Byte-range addressing: extents resolved to image offsets, with file slack
+  reported separately, correct on wrapper and classic HFS volumes
+- Whole-catalog traversal with paths, resolved once per directory rather than
+  once per record
+- Composite file identity and the volume's stored identifier and derived UUID,
+  for correlating two readings of a volume
+- JSON-encodable volume report
 - Mac OS Roman decoding for classic HFS names
 - Structural anomaly reporting for damaged volumes
 - Allocation guard against implausible on-disk sizes
@@ -101,6 +108,9 @@ Current limitations:
 - LZVN, LZFSE and LZBITMAP decmpfs codecs are not built in — register your own
 - Resource-fork decompression is implemented from published descriptions and
   has not been validated against a macOS-produced compressed file
+- The displayed volume UUID is derived from the published algorithm and has not
+  been checked against a UUID produced by macOS itself; the stored identifier
+  from `VolumeIdentifier()` carries no such doubt
 - ACLs in `com.apple.system.Security` are returned as opaque bytes
 - Classic HFS script encodings other than Mac OS Roman are not decoded
 - Classic HFS carries no extended attributes, access dates, attribute
@@ -161,11 +171,21 @@ Volume-level:
 - `(*Volume).WalkDir(path string, cb func(DirEntry) error) error`
 - `(*Volume).WalkCatalog(cb func(CatalogRecord) error) error`
 - `(*Volume).PathForCNID(cnid uint32) (string, error)`
+- `(*Volume).WalkPaths(cb func(path string, rec CatalogRecord) error) error`
+- `(*Volume).WalkPathsContext(ctx context.Context, cb func(path string, rec CatalogRecord) error) error`
+- `(*Volume).PathRecords() ([]PathRecord, error)`
 - `(*Volume).GetTimes(cnid uint32) (CatalogTimes, error)`
 - `(*Volume).GetTimesByPath(path string) (CatalogTimes, error)`
 - `(*Volume).OpenCNIDRaw(cnid uint32) (CatalogRecord, error)`
 - `(*Volume).ReadLink(cnid uint32) (string, error)`
 - `(*Volume).Capabilities() Capabilities`
+- `(*Volume).VolumeIdentifier() (VolumeIdentifier, error)`
+- `(*Volume).UUID() (string, error)`
+- `(*Volume).IdentityByCNID(cnid uint32) (FileIdentity, error)`
+- `(*Volume).IdentityByPath(path string) (FileIdentity, error)`
+- `(CatalogRecord).Identity() FileIdentity`
+- `(*Volume).Report(opts *ReportOptions) (Report, error)`
+- `(*Volume).ReportContext(ctx context.Context, opts *ReportOptions) (Report, error)`
 - `(*Volume).SetCacheSize(n int)` / `SetNodeCacheSize(n int)` / `SetMaxAlloc(n int64)`
 - `(*Volume).SetTextEncoding(e TextEncoding)`
 - `(*Volume).Anomalies() []Anomaly`
@@ -184,6 +204,18 @@ Allocation state:
 - `(*Volume).WalkUnallocated(cb func(start, count uint32) error) error`
 - `(*Volume).FreeBlockCount() (uint32, error)`
 
+Block addressing — read "Block addressing and slack" below before using these,
+in particular the distinction between `Length` and `Slack`:
+
+- `(*Volume).BaseOffset() int64`
+- `(*Volume).BlockOffset(block uint32) (int64, error)`
+- `(*Volume).DataForkRanges(cnid uint32) ([]ByteRange, error)`
+- `(*Volume).ResourceForkRanges(cnid uint32) ([]ByteRange, error)`
+- `(*Volume).XAttrRanges(cnid uint32, name string) ([]ByteRange, error)`
+- `(*Volume).ExtentRanges(exts []ExtentDescriptor, logicalSize int64) ([]ByteRange, error)`
+- `(*Volume).ResolveDataForkExtents(cnid uint32) ([]ExtentDescriptor, error)`
+- `(*Volume).ResolveResourceForkExtents(cnid uint32) ([]ExtentDescriptor, error)`
+
 Deleted-record recovery — read "Deleted-record recovery" below before relying on
 these, in particular the caveat about `Overwritten`:
 
@@ -200,6 +232,134 @@ File-level:
 - `(*File).Read(p []byte) (int, error)`
 - `(*File).ReadAt(p []byte, off int64) (int, error)`
 - `(*File).ReadAll() ([]byte, error)`
+
+## Block addressing and slack
+
+An `ExtentDescriptor` counts in allocation blocks. A block number is not a byte
+offset, and converting one needs both the block size and the volume's base
+offset:
+
+```go
+ranges, err := vol.DataForkRanges(rec.CNID)
+if err != nil {
+    log.Fatal(err)
+}
+for _, r := range ranges {
+    buf := make([]byte, r.Length)
+    if _, err := image.ReadAt(buf, r.DiskOffset); err != nil {
+        log.Fatal(err)
+    }
+    // r.DiskOffset+r.Length is where this block's file slack begins,
+    // and r.Slack is how much of it there is.
+}
+```
+
+Four things to understand before treating the output as evidence:
+
+- **Block numbers are not byte offsets.** `BaseOffset()` is the image byte
+  offset that allocation block 0 maps to. It is zero only for a plain HFS+ or
+  HFSX volume at the start of the reader; it is non-zero for classic HFS and
+  for any HFS+ volume embedded in an HFS wrapper. Getting it wrong is silent —
+  the read succeeds and returns some other part of the image.
+- **`Length` excludes slack.** It stops at the fork's logical size, so reading
+  `Length` bytes at `DiskOffset` never picks up what the previous occupant of
+  the block left behind. `Slack` counts the allocated bytes after it, beginning
+  at `DiskOffset+Length`, and `AllocatedLength()` is the two together.
+- **A compressed file's data fork is empty on disk.** decmpfs keeps the payload
+  in an extended attribute or the resource fork, so `DataForkRanges` correctly
+  returns nothing while `OpenFileByCNID` returns the decompressed contents.
+  Check `CatalogRecord.Compressed`.
+- **Recovered records carry stale pointers.** `ExtentRanges` will happily
+  convert the fork data on a `DeletedRecord`, but those blocks may since have
+  been reallocated — see `DeletedRecord.Overwritten` and "Deleted-record
+  recovery" below.
+
+Attribute extents work slightly differently from fork extents: they come from
+the attributes tree alone, carried in extension records beside the fork-data
+record rather than in the extents-overflow tree, and they are not trimmed
+against a block total because an attribute record does not record one.
+
+## Catalog walks with paths
+
+`WalkPaths` enumerates the catalog with each record's path, resolving parents
+once per directory instead of once per record:
+
+```go
+err := vol.WalkPaths(func(path string, rec CatalogRecord) error {
+    fmt.Printf("%s	%d	%d
+", path, rec.CNID, rec.DataFork.LogicalSize)
+    return nil
+})
+```
+
+- **Order is B-tree key order**, parent CNID then name — not directory order,
+  and not parents before children. Do not build a tree by attaching each record
+  to a parent already seen; use the path.
+- **Thread records are not emitted**, unlike `WalkCatalog`. A thread record is
+  path information rather than a thing with a path.
+- **Orphans are emitted with an empty path.** A record whose parent chain
+  cannot be followed to the root is still reported, and the condition is
+  recorded through `Anomalies()`. Suppressing those would hide exactly the
+  damage worth finding, and inventing a path would be a claim the volume does
+  not support.
+
+## Identity across two readings
+
+A CNID is reused once the volume wraps around `NextCatalogID`, so it does not
+by itself identify a file between two readings of a volume. `FileIdentity`
+pairs it with the creation date:
+
+```go
+before := recBefore.Identity()
+after := recAfter.Identity()
+if before.Comparable() && before.Equal(after) {
+    // same file, as far as the volume can say
+}
+```
+
+- **This is evidence of sameness, not proof.** Anything that can write the
+  volume can write both halves.
+- **Hard links collapse.** `IdentityByCNID` resolves to the target inode, so
+  every path pointing at one file yields one identity. Use `OpenCNIDRaw` with
+  `CatalogRecord.Identity()` when the link itself is what is being tracked.
+- **Creation dates survive copying.** A file copied with `cp -p` keeps its birth
+  date but gains a new CNID, so a non-match is not proof of difference either.
+- **Classic HFS dates are not anchored.** When `Source` is `TimeSourceHFSLocal`
+  the date is a wall-clock reading with no recorded offset, so it is comparable
+  only within readings of the same volume. `Equal` refuses to match across
+  clock kinds.
+
+For the volume itself, `VolumeIdentifier()` returns the 64-bit value stored in
+the volume header and `UUID()` returns the RFC 4122 string macOS displays. They
+are **different values** — the second is an MD5 derivation of the first, not a
+reformatting of it — and only the second will match `diskutil` or a system log.
+
+## JSON report
+
+`Report` assembles a JSON-encodable summary. The library does not marshal it;
+the caller does.
+
+```go
+rep, err := vol.Report(&hfs.ReportOptions{IncludeFiles: true, MaxFiles: 5000})
+if err != nil {
+    log.Fatal(err)
+}
+out, _ := json.MarshalIndent(rep, "", "  ")
+```
+
+- **Null means absent, not the epoch.** A zero `CatalogTimes` field and a
+  clamped volume-header date both encode as `null`. The cost is that a volume
+  genuinely created at the Unix epoch reports no creation date — dates before
+  1970 are already lost when the header is parsed.
+- **The file listing is off by default and bounded when on.** Building it is a
+  full catalog walk. `MaxFiles` defaults to `DefaultReportMaxFiles`; a negative
+  value is unbounded, and `FilesTruncated` says whether the bound was reached.
+- **Block counts are the header's claim, not the bitmap's.** That is what a
+  report should quote; `FreeBlockCount()` counts the bits instead, and a
+  mismatch between the two is itself a finding.
+- **The report projects, it does not extend.** Every field is reachable through
+  the ordinary API; the type exists so a tool can emit one document rather than
+  assemble one.
 
 ## Concurrency
 

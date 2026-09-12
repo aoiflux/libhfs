@@ -704,6 +704,16 @@ func splitPath(p string) []string {
 	return out
 }
 
+// PathForCNID returns the full path of a catalog node, resolved by climbing
+// thread records to the root.
+//
+// The record must exist: a CNID with no catalog record reports [ErrNotFound]
+// rather than an empty path. A parent chain that loops reports [ErrCorrupt],
+// which on a damaged volume is a finding rather than merely a failed lookup.
+//
+// Each call climbs the whole chain. To resolve paths for the entire catalog,
+// use [Volume.WalkPaths], which shares the work across records instead of
+// repeating it per record.
 func (v *Volume) PathForCNID(cnid uint32) (string, error) {
 	if cnid == rootFolderCNID {
 		return "/", nil
@@ -713,31 +723,7 @@ func (v *Volume) PathForCNID(cnid uint32) (string, error) {
 		return "", err
 	}
 
-	parts := make([]string, 0, 8)
-	visited := map[uint32]struct{}{}
-	cur := cnid
-
-	for cur != rootFolderCNID {
-		if _, seen := visited[cur]; seen {
-			return "", &ParseError{Op: "path_for_cnid", Offset: int64(cur), Err: ErrCorrupt}
-		}
-		visited[cur] = struct{}{}
-
-		thr, err := v.findThreadRecord(cur)
-		if err != nil {
-			return "", err
-		}
-		if thr.Name == "" {
-			return "", &ParseError{Op: "path_for_cnid", Offset: int64(cur), Err: ErrCorrupt}
-		}
-		parts = append(parts, thr.Name)
-		cur = thr.ParentCNID
-	}
-
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
-	}
-	return "/" + strings.Join(parts, "/"), nil
+	return v.pathUp(cnid, nil)
 }
 
 func (v *Volume) findThreadRecord(targetCNID uint32) (CatalogRecord, error) {

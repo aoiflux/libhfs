@@ -18,6 +18,7 @@ func FuzzOpen(f *testing.F) {
 	f.Add(buildValidCatalogImage(f))
 	f.Add(buildClassicHFSTimesImage(f))
 	f.Add(buildXAttrImage(f))
+	f.Add(buildWrappedHFSPlusImage(f))
 	f.Add(make([]byte, volumeHeaderOffset+volumeHeaderSize))
 	f.Add([]byte("not a filesystem"))
 
@@ -35,6 +36,17 @@ func FuzzOpen(f *testing.F) {
 		_, _ = vol.OpenPath("/anything")
 		_, _ = vol.PathForCNID(rootFolderCNID)
 		_ = vol.Capabilities()
+
+		_ = vol.BaseOffset()
+		_, _ = vol.BlockOffset(0)
+		_, _ = vol.DataForkRanges(rootFolderCNID)
+		_, _ = vol.ResourceForkRanges(rootFolderCNID)
+		_, _ = vol.VolumeIdentifier()
+		_, _ = vol.UUID()
+		_ = vol.WalkPaths(func(string, CatalogRecord) error { return nil })
+		// Report(nil) omits the file listing by default, which is what keeps
+		// this affordable to fuzz; the listing itself is covered separately.
+		_, _ = vol.Report(nil)
 	})
 }
 
@@ -183,6 +195,7 @@ func FuzzXAttr(f *testing.F) {
 			}
 			for _, a := range attrs {
 				_, _ = vol.ReadXAttr(cnid, a.Name)
+				_, _ = vol.XAttrRanges(cnid, a.Name)
 			}
 		}
 	})
@@ -210,6 +223,9 @@ func TestParsersRejectTruncatedInput(t *testing.T) {
 		_, _ = vol.GetRootDirectory()
 		_ = vol.WalkCatalog(func(CatalogRecord) error { return nil })
 		_, _ = vol.ReadDir("/")
+		_ = vol.WalkPaths(func(string, CatalogRecord) error { return nil })
+		_, _ = vol.DataForkRanges(rootFolderCNID)
+		_, _ = vol.Report(nil)
 	}
 }
 
@@ -244,6 +260,9 @@ func TestParsersRejectCorruptedBytes(t *testing.T) {
 			_ = vol.WalkCatalog(func(CatalogRecord) error { return nil })
 			_, _ = vol.ReadDirCNID(rootFolderCNID)
 			_, _ = vol.RecoverDeleted(nil)
+			_ = vol.WalkPaths(func(string, CatalogRecord) error { return nil })
+			_, _ = vol.DataForkRanges(rootFolderCNID)
+			_, _ = vol.Report(&ReportOptions{IncludeFiles: true, MaxFiles: 64})
 		}
 	}
 }

@@ -150,6 +150,24 @@ const (
 	CatalogRecordFileThread   CatalogRecordType = CatalogRecordType(catalogRecordFileThread)
 )
 
+// String names the record type. An unrecognised value renders as "unknown"
+// rather than as its number, because a record type this package does not know
+// is a damaged record rather than a new kind of one.
+func (t CatalogRecordType) String() string {
+	switch t {
+	case CatalogRecordFolder:
+		return "folder"
+	case CatalogRecordFile:
+		return "file"
+	case CatalogRecordFolderThread:
+		return "folder thread"
+	case CatalogRecordFileThread:
+		return "file thread"
+	default:
+		return "unknown"
+	}
+}
+
 // TimeSource describes how a set of catalog timestamps must be interpreted.
 // Callers doing timeline work need this: HFS+ catalog dates are GMT, but
 // classic HFS records wall-clock local time with no recorded UTC offset.

@@ -17,41 +17,41 @@ const (
 // access times" from "every access time happened to be zero".
 type Capabilities struct {
 	// ExtendedAttributes reports whether the volume has an attributes B-tree.
-	ExtendedAttributes bool
+	ExtendedAttributes bool `json:"extendedAttributes"`
 
 	// HardLinks reports whether the format supports hard links. Classic HFS
 	// does not.
-	HardLinks bool
+	HardLinks bool `json:"hardLinks"`
 
 	// Compression reports whether the format supports decmpfs compression,
 	// which requires extended attributes.
-	Compression bool
+	Compression bool `json:"compression"`
 
 	// AccessTimes reports whether catalog records carry an access date.
 	// Classic HFS has no such field, so CatalogTimes.Accessed is always zero
 	// there — a fact about the format, not about the files.
-	AccessTimes bool
+	AccessTimes bool `json:"accessTimes"`
 
 	// AttrModTimes reports whether catalog records carry an
 	// attribute-modification date. Classic HFS does not.
-	AttrModTimes bool
+	AttrModTimes bool `json:"attrModTimes"`
 
 	// POSIXPermissions reports whether catalog records carry BSD ownership and
 	// mode. Classic HFS predates it.
-	POSIXPermissions bool
+	POSIXPermissions bool `json:"posixPermissions"`
 
 	// CaseSensitive reports whether name comparison is case-sensitive. Only
 	// HFSX volumes formatted that way are.
-	CaseSensitive bool
+	CaseSensitive bool `json:"caseSensitive"`
 
 	// Journaled reports whether the volume has a journal. This package does not
 	// read the journal, but its presence tells an examiner that a source of
 	// recent pre-commit metadata exists on the volume.
-	Journaled bool
+	Journaled bool `json:"journaled"`
 
 	// UnicodeNames reports whether names are stored as Unicode. Classic HFS
 	// stores bytes in a Mac script encoding instead — see Volume.SetTextEncoding.
-	UnicodeNames bool
+	UnicodeNames bool `json:"unicodeNames"`
 }
 
 // Capabilities returns what this volume's format supports.

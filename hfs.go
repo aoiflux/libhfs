@@ -41,6 +41,14 @@
 //   - [Volume.ResolveDataForkExtents] and [Volume.ResolveResourceForkExtents]
 //     expose the on-disk fragments a fork occupies, for callers that need block
 //     addresses rather than bytes
+//   - [Volume.DataForkRanges] and [Volume.ResourceForkRanges] give the same
+//     fragments as image byte offsets, and [Volume.BaseOffset] is the origin
+//     those are measured from
+//   - [Volume.WalkPaths] enumerates the catalog with each record's path,
+//     sharing the resolution work rather than repeating it per record
+//   - [CatalogRecord.Identity] and [Volume.VolumeIdentifier] give handles for
+//     matching a file, and a volume, across two readings
+//   - [Volume.Report] assembles a JSON-encodable summary of all of the above
 //   - [Volume.ListXAttrs], [Volume.ReadXAttr] and [Volume.WalkXAttrs] read
 //     extended attributes
 //   - [Volume.RecoverDeleted] and [Volume.WalkDeleted] surface records the
@@ -93,6 +101,43 @@
 // needing an unavailable codec yields [ErrUnsupportedCompression] rather than
 // wrong bytes, and its raw resource fork stays readable through the
 // OpenResourceFork methods so the artifact can still be preserved.
+//
+// Block addressing. An [ExtentDescriptor] counts in allocation blocks, and a
+// block number is not a byte offset. The byte a block begins at is
+// [Volume.BaseOffset] plus the block number times the block size, and the base
+// offset is non-zero for classic HFS and for any HFS+ volume embedded in an HFS
+// wrapper — exactly the volumes where getting it wrong matters. It is wrong
+// silently: the read succeeds and returns another part of the image. Prefer
+// [Volume.DataForkRanges] and [Volume.ExtentRanges], which do the conversion.
+// In a [ByteRange], Length stops at the fork's logical size and Slack counts
+// the allocated bytes after it, so reading Length bytes never picks up what the
+// previous occupant of the block left behind — and so that slack, which is
+// usually the point of looking, is still addressable at DiskOffset+Length.
+// Ranges describe a fork as stored, so a decmpfs-compressed file reports an
+// empty data fork even though [Volume.OpenFileByCNID] returns its contents.
+//
+// Walk order and orphans. [Volume.WalkPaths] and [Volume.WalkCatalog] traverse
+// in catalog B-tree key order — parent CNID ascending, then name — which is
+// neither directory order nor parents before children, so a tree cannot be
+// built by attaching each record to a parent already seen. A record whose
+// parent chain cannot be followed to the root is still emitted by WalkPaths,
+// with an empty path and an anomaly recorded: on a damaged volume those records
+// are usually the point, and inventing a path for one would be a claim the
+// volume does not support.
+//
+// Identity across readings. A CNID is reused once the volume wraps around
+// VolumeHeader.NextCatalogID, so it does not by itself identify a file between
+// two readings. [FileIdentity] pairs it with the creation date, which nothing
+// in normal use rewrites. That is evidence of sameness rather than proof:
+// anything that can write the volume can write both halves, a hard link
+// resolves to its inode so two links share one identity, and a copied file
+// keeps its birth date while gaining a new CNID.
+//
+// Volume identifiers. [Volume.VolumeIdentifier] returns the 64-bit value stored
+// in the volume header. [Volume.UUID] returns the RFC 4122 string macOS
+// displays, which is derived from those bytes by hashing rather than by
+// reformatting them — the two share no digits, and only the second will match
+// what diskutil or a system log records.
 //
 // Hostile input. Sizes come from the volume, so a corrupt image can declare an
 // enormous fork. [Volume.SetMaxAlloc] caps any single buffer sized from an

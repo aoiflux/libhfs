@@ -93,9 +93,9 @@ func (v *Volume) evictOldestNodeLocked() {
 // and without this a caller cannot distinguish a clean volume from a damaged
 // one that happened to answer the questions asked of it.
 type Anomaly struct {
-	Op     string // the operation that observed it, e.g. "catalog_search"
-	Offset int64  // context value; a CNID or byte offset depending on Op
-	Detail string // human-readable description
+	Op     string `json:"op"`     // the operation that observed it, e.g. "catalog_search"
+	Offset int64  `json:"offset"` // context value; a CNID or byte offset depending on Op
+	Detail string `json:"detail"` // human-readable description
 }
 
 // Anomalies returns the distinct anomalies observed on this volume so far, in
