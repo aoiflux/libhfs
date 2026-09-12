@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings: this repo is developed on Windows with
+# core.autocrlf on, and a CRLF script fails under sh with "\r: not found" on the
+# first line it runs. testdata/gen_corpus.sh is executed under WSL.
+*.sh text eol=lf
