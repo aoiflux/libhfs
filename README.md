@@ -302,6 +302,33 @@ err := vol.WalkPaths(func(path string, rec CatalogRecord) error {
   damage worth finding, and inventing a path would be a claim the volume does
   not support.
 
+## Stopping a walk
+
+Every `Walk*` method takes a callback, and returning `ErrStopWalk` from one ends
+the walk successfully:
+
+```go
+var found hfs.CatalogRecord
+err := vol.WalkCatalog(func(r hfs.CatalogRecord) error {
+    if r.Name == "secrets.txt" {
+        found = r
+        return hfs.ErrStopWalk
+    }
+    return nil
+})
+```
+
+- **Any other error ends the walk too, and comes back unchanged.** Stopping
+  because you found what you wanted and stopping because the image is unreadable
+  both leave you with a partial answer; only one of them is a finding about the
+  volume.
+- **It is matched with `errors.Is`**, so a callback can wrap it to carry a
+  reason back out of the traversal.
+- **`WalkDeleted` stops early in the expensive sense too.** It runs three scans
+  in sequence and a stop skips the ones that have not started, including the
+  unallocated scan that reads every free block on the volume.
+- libhfs never returns `ErrStopWalk` as a failure of its own.
+
 ## Identity across two readings
 
 A CNID is reused once the volume wraps around `NextCatalogID`, so it does not

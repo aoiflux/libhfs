@@ -196,7 +196,7 @@ func TestWalkDirAndWalkCatalog(t *testing.T) {
 			seenCNIDs[r.CNID] = true
 		}
 		if r.CNID == 101 {
-			return errStopWalk
+			return ErrStopWalk
 		}
 		return nil
 	})

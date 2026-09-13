@@ -260,10 +260,7 @@ func (v *Volume) WalkPaths(cb func(path string, rec CatalogRecord) error) error 
 		}
 		return cb(path, rec)
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
-		return err
-	}
-	return nil
+	return endWalk(err)
 }
 
 // WalkPathsContext is [Volume.WalkPaths] with cancellation.

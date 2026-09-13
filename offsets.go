@@ -271,10 +271,10 @@ const (
 
 // decmpfs attribute value layout.
 const (
-	decmpfsMagicOffset      = 0
-	decmpfsMagicSize        = 4
-	decmpfsTypeOffset       = 4
-	decmpfsUncompressedSize = 8
+	decmpfsMagicOffset            = 0
+	decmpfsMagicSize              = 4
+	decmpfsTypeOffset             = 4
+	decmpfsUncompressedSizeOffset = 8
 	// decmpfsHeaderSize is declared in attributes.go alongside the attribute
 	// record constants it is used with.
 )

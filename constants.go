@@ -76,8 +76,3 @@ const (
 const (
 	rootFolderCNID = uint32(2)
 )
-
-const (
-	hfsHardlinkFileType    = uint32(0x686C6E6B) // "hlnk"
-	hfsHardlinkFileCreator = uint32(0x6866732B) // "hfs+"
-)

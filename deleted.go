@@ -243,19 +243,23 @@ func (v *Volume) WalkDeletedContext(ctx context.Context, opts *RecoveryOptions, 
 		return cb(rec)
 	}
 
+	// Each phase returns on the first callback error, so a stop in one of them
+	// skips the phases after it as well — which is the point: a caller who has
+	// seen enough should not pay for the unallocated scan, the most expensive
+	// of the three by a wide margin.
 	if o.ScanNodeSlack {
 		if err := v.scanNodeSlack(hdr, nodeAt, emit); err != nil {
-			return err
+			return endWalk(err)
 		}
 	}
 	if o.ScanFreeNodes {
 		if err := v.scanFreeNodes(hdr, nodeAt, emit); err != nil {
-			return err
+			return endWalk(err)
 		}
 	}
 	if o.ScanUnallocated {
 		if err := v.scanUnallocatedNodes(ctx, hdr, emit); err != nil {
-			return err
+			return endWalk(err)
 		}
 	}
 	return nil

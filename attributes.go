@@ -9,8 +9,6 @@ import (
 const (
 	attributesFileCNID       = uint32(8)
 	attrRecordTypeInlineData = uint32(0x10)
-	decmpfsTypeZlibAttr      = uint32(3)
-	decmpfsTypeRawAttr       = uint32(9)
 	decmpfsHeaderSize        = 16
 	decmpfsAttrName          = "com.apple.decmpfs"
 )
@@ -186,12 +184,12 @@ func (v *Volume) readDecmpfsAttr(cnid uint32) (decmpfsHeader, []byte, bool, erro
 		hdr = h
 		payload = append([]byte(nil), attr[decmpfsHeaderSize:]...)
 		found = true
-		return errStopWalk
+		return ErrStopWalk
 	})
 	if errors.Is(err, ErrMissingExtent) {
 		return decmpfsHeader{}, nil, false, nil
 	}
-	if err != nil && !errors.Is(err, errStopWalk) {
+	if err != nil && !errors.Is(err, ErrStopWalk) {
 		return decmpfsHeader{}, nil, false, err
 	}
 	return hdr, payload, found, nil

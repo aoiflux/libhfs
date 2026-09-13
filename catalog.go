@@ -8,8 +8,6 @@ import (
 	"unicode/utf16"
 )
 
-var errStopWalk = errors.New("hfs: stop walk")
-
 // decodeCatalogTimesHFSPlus reads the five HFS+ catalog dates. Both
 // HFSPlusCatalogFolder and HFSPlusCatalogFile place them at the same offsets,
 // so one decoder serves both. The caller must have already checked that
@@ -268,10 +266,7 @@ func (v *Volume) WalkCatalog(cb func(CatalogRecord) error) error {
 		}
 		return cb(r)
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
-		return err
-	}
-	return nil
+	return endWalk(err)
 }
 
 func (v *Volume) OpenCNID(cnid uint32) (CatalogRecord, error) {
@@ -341,9 +336,9 @@ func (v *Volume) lookupCNIDViaThread(cnid uint32) (CatalogRecord, error) {
 		}
 		out = r
 		found = true
-		return errStopWalk
+		return ErrStopWalk
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
+	if err != nil && !errors.Is(err, ErrStopWalk) {
 		return CatalogRecord{}, err
 	}
 	if found {
@@ -395,11 +390,11 @@ func (v *Volume) lookupCNIDLinear(cnid uint32) (CatalogRecord, error) {
 			}
 			out = r
 			found = true
-			return errStopWalk
+			return ErrStopWalk
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
+	if err != nil && !errors.Is(err, ErrStopWalk) {
 		return CatalogRecord{}, err
 	}
 	if found {
@@ -541,11 +536,11 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 			}
 			out = r
 			found = true
-			return errStopWalk
+			return ErrStopWalk
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
+	if err != nil && !errors.Is(err, ErrStopWalk) {
 		return CatalogRecord{}, err
 	}
 	if found {
@@ -668,10 +663,7 @@ func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 			IsSystem:    isSystemFile(r.Name),
 		})
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
-		return err
-	}
-	return nil
+	return endWalk(err)
 }
 
 // isSystemFile reports whether a catalog name is filesystem metadata rather
@@ -691,7 +683,7 @@ func isSystemFile(name string) bool {
 	if name[0] == 0x00 || name[0] == '$' {
 		return true
 	}
-	if strings.Contains(name, "HFS+ Private") {
+	if strings.Contains(name, privateDataDirNameSub) {
 		return true
 	}
 	if strings.HasPrefix(name, ".HFS") {
@@ -754,9 +746,9 @@ func (v *Volume) findThreadRecord(targetCNID uint32) (CatalogRecord, error) {
 		}
 		out = r
 		found = true
-		return errStopWalk
+		return ErrStopWalk
 	})
-	if err != nil && !errors.Is(err, errStopWalk) {
+	if err != nil && !errors.Is(err, ErrStopWalk) {
 		return CatalogRecord{}, err
 	}
 	if !found {

@@ -32,8 +32,8 @@ func (v *Volume) BlockAllocated(block uint32) (bool, error) {
 }
 
 // WalkUnallocated invokes cb for each maximal run of consecutive free blocks,
-// in ascending block order. Returning a non-nil error from cb stops the walk
-// and returns that error.
+// in ascending block order. Returning [ErrStopWalk] from cb ends the walk
+// successfully; any other non-nil error stops it and is returned.
 //
 // This is the input to carving: unallocated space is where deleted content
 // survives.
@@ -44,7 +44,14 @@ func (v *Volume) WalkUnallocated(cb func(start, count uint32) error) error {
 	if v == nil || v.reader == nil {
 		return &ParseError{Op: "walk_unallocated", Offset: 0, Err: ErrCorrupt}
 	}
+	return endWalk(v.walkFreeRuns(cb))
+}
 
+// walkFreeRuns is WalkUnallocated's traversal, split out so that what a
+// callback's error means is decided in one place. The loop below hands a
+// callback error back from four separate exits, and a stop test repeated at
+// each of them is a stop test that will eventually be missed at one.
+func (v *Volume) walkFreeRuns(cb func(start, count uint32) error) error {
 	total := v.header.TotalBlocks
 	if total == 0 {
 		return nil

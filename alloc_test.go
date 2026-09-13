@@ -3,6 +3,7 @@ package hfs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"sort"
 	"testing"
 )
@@ -109,17 +110,21 @@ func TestCorpusWalkUnallocatedRuns(t *testing.T) {
 	}
 }
 
+// A callback's own error stops the walk and comes back unchanged. The sentinel
+// here is deliberately not [ErrStopWalk]: that one means "I am done", and
+// reporting it as a failure would be as wrong as reporting a real read error as
+// success. TestWalkStopSentinel covers the other half.
 func TestWalkUnallocatedStopsOnCallbackError(t *testing.T) {
 	vol, cleanup := corpusVolume(t)
 	defer cleanup()
 
-	sentinel := errStopWalk
+	sentinel := errors.New("caller gave up")
 	var seen int
 	err := vol.WalkUnallocated(func(uint32, uint32) error {
 		seen++
 		return sentinel
 	})
-	if err != sentinel {
+	if !errors.Is(err, sentinel) {
 		t.Fatalf("WalkUnallocated returned %v, want the callback's error", err)
 	}
 	if seen != 1 {

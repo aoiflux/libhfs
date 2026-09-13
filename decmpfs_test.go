@@ -333,6 +333,17 @@ func zlibCompress(t testing.TB, in []byte) []byte {
 // even-numbered decmpfs types.
 func buildDecmpfsResourceFork(t testing.TB, payload []byte) []byte {
 	t.Helper()
+	return buildDecmpfsResourceForkAt(t, payload, resourceHeaderSize)
+}
+
+// buildDecmpfsResourceForkAt is buildDecmpfsResourceFork with the resource data
+// placed at a chosen offset, which the header's first word announces.
+//
+// Anything past the conventional 0x100 and before that offset is filled with
+// 0xEE, so a decoder that ignores the header word and assumes 0x100 reads
+// filler and fails rather than quietly succeeding.
+func buildDecmpfsResourceForkAt(t testing.TB, payload []byte, dataOffset int) []byte {
+	t.Helper()
 
 	numChunks := (len(payload) + decmpfsChunkSize - 1) / decmpfsChunkSize
 	chunks := make([][]byte, numChunks)
@@ -342,7 +353,6 @@ func buildDecmpfsResourceFork(t testing.TB, payload []byte) []byte {
 		chunks[i] = zlibCompress(t, payload[start:end])
 	}
 
-	const dataOffset = 0x100
 	tableBase := dataOffset + 4 // chunk count sits here
 	dataStart := tableBase + 4 + numChunks*8
 
@@ -352,7 +362,10 @@ func buildDecmpfsResourceFork(t testing.TB, payload []byte) []byte {
 	}
 
 	out := make([]byte, total)
-	binary.BigEndian.PutUint32(out[0:4], dataOffset)         // resource header
+	for i := resourceHeaderSize; i < dataOffset && i < len(out); i++ {
+		out[i] = 0xEE
+	}
+	binary.BigEndian.PutUint32(out[0:4], uint32(dataOffset)) // resource header
 	binary.BigEndian.PutUint32(out[dataOffset:dataOffset+4], // total length
 		uint32(total-dataOffset))
 	binary.LittleEndian.PutUint32(out[tableBase:tableBase+4], uint32(numChunks))
@@ -367,6 +380,35 @@ func buildDecmpfsResourceFork(t testing.TB, payload []byte) []byte {
 		pos += len(c)
 	}
 	return out
+}
+
+// TestDecmpfsResourceForkHonoursDataOffset pins the one field of the
+// resource-fork header the decoder reads.
+//
+// Every other fixture puts the resource data at the conventional 0x100, which
+// is also the offset the decoder falls back to when the header word is
+// unusable. Those fixtures therefore pass whether that word is read correctly,
+// read from the wrong bytes, or ignored altogether — moving the data elsewhere
+// is what makes reading it observable.
+func TestDecmpfsResourceForkHonoursDataOffset(t *testing.T) {
+	payload := bytes.Repeat([]byte("resource fork payload; "), 400)
+	const dataOffset = 0x180
+
+	fork := buildDecmpfsResourceForkAt(t, payload, dataOffset)
+
+	// The premise: the conventional offset holds filler, so falling back to it
+	// cannot succeed by accident.
+	if fork[resourceHeaderSize] != 0xEE {
+		t.Fatalf("no filler at 0x%X; the fixture cannot tell the two offsets apart", resourceHeaderSize)
+	}
+
+	got, err := decodeDecmpfsResourceFork(fork, uint64(len(payload)), inflateZlib)
+	if err != nil {
+		t.Fatalf("decodeDecmpfsResourceFork: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("decompressed %d bytes, want the %d-byte payload", len(got), len(payload))
+	}
 }
 
 func openDecmpfsFixture(t *testing.T) *Volume {

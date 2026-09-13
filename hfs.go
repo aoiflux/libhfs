@@ -56,6 +56,7 @@
 //     filesystem no longer lists
 //   - [Volume.Capabilities] reports what the volume's format can hold, so
 //     callers branch on a value rather than on [Volume.Kind]
+//   - every Walk method stops early when its callback returns [ErrStopWalk]
 //
 // # Things that are easy to get wrong
 //
@@ -125,6 +126,15 @@
 // with an empty path and an anomaly recorded: on a damaged volume those records
 // are usually the point, and inventing a path for one would be a claim the
 // volume does not support.
+//
+// Stopping a walk. Returning [ErrStopWalk] from any Walk callback ends the
+// traversal and makes the Walk method return nil; any other error also ends it
+// but is returned unchanged. A caller that stops at the first match and a
+// caller whose walk died partway through an image both hold a partial answer,
+// and on a forensic tool those two must not be reported the same way. For
+// WalkDeleted the distinction is also a cost: a stop skips the scan phases that
+// have not run yet, and the last of them reads every unallocated block on the
+// volume.
 //
 // Identity across readings. A CNID is reused once the volume wraps around
 // VolumeHeader.NextCatalogID, so it does not by itself identify a file between

@@ -151,12 +151,12 @@ func parseDecmpfsHeader(attr []byte) (decmpfsHeader, bool) {
 	if len(attr) < decmpfsHeaderSize {
 		return decmpfsHeader{}, false
 	}
-	if !bytes.Equal(attr[0:4], decmpfsMagic[:]) {
+	if !bytes.Equal(attr[decmpfsMagicOffset:decmpfsMagicOffset+decmpfsMagicSize], decmpfsMagic[:]) {
 		return decmpfsHeader{}, false
 	}
 	return decmpfsHeader{
-		CompressionType:  binary.LittleEndian.Uint32(attr[4:8]),
-		UncompressedSize: binary.LittleEndian.Uint64(attr[8:16]),
+		CompressionType:  binary.LittleEndian.Uint32(attr[decmpfsTypeOffset:decmpfsUncompressedSizeOffset]),
+		UncompressedSize: binary.LittleEndian.Uint64(attr[decmpfsUncompressedSizeOffset:decmpfsHeaderSize]),
 	}, true
 }
 
@@ -293,14 +293,12 @@ func (v *Volume) decodeResourceForkPayload(h decmpfsHeader, rec CatalogRecord) (
 // decodeDecmpfsResourceFork parses the chunk table and decompresses each chunk.
 // Split out from the volume so it can be tested directly against a fork image.
 func decodeDecmpfsResourceFork(raw []byte, uncompressedSize uint64, codec func([]byte, int) ([]byte, error)) ([]byte, error) {
-	const resourceHeaderSize = 0x100
-
 	if len(raw) < resourceHeaderSize+8 {
 		return nil, &ParseError{Op: "decmpfs_fork", Offset: int64(len(raw)), Err: ErrCorrupt}
 	}
 
 	// The resource-fork header's first word is the offset of the resource data.
-	dataOffset := int64(be32(raw[0:4]))
+	dataOffset := int64(be32(raw[resourceDataOffsetField : resourceDataOffsetField+resourceDataOffsetSize]))
 	if dataOffset <= 0 || dataOffset+8 > int64(len(raw)) {
 		// Fall back to the conventional 0x100 when the header is unhelpful.
 		dataOffset = resourceHeaderSize

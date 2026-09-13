@@ -220,9 +220,9 @@ func (v *Volume) ReadXAttr(cnid uint32, name string) ([]byte, error) {
 		}
 		inline = append([]byte(nil), payload[attrInlineHeaderSize:attrInlineHeaderSize+size]...)
 		found = true
-		return errStopWalk
+		return ErrStopWalk
 	})
-	if err != nil && !isStopWalk(err) {
+	if err := endWalk(err); err != nil {
 		return nil, err
 	}
 	if found {
@@ -348,14 +348,10 @@ func (v *Volume) WalkXAttrs(cb func(XAttr) error) error {
 		return nil
 	})
 	if err != nil {
-		if isStopWalk(err) {
-			return nil
-		}
-		return err
+		// A stop leaves any pending fork-data attribute unflushed on purpose:
+		// the caller asked to stop at the record before it, not to be handed
+		// one more.
+		return endWalk(err)
 	}
 	return flush()
-}
-
-func isStopWalk(err error) bool {
-	return err == errStopWalk
 }
