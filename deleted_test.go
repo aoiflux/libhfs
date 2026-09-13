@@ -15,6 +15,109 @@ import (
 // worth making: the carving machinery finds the bytes, and the live cross-check
 // correctly declines to call any of them a deletion. A library that reported
 // 179 deleted files for this image would be confidently wrong.
+// catalogLeavesWithKeyResidue counts catalog leaf nodes whose unused space
+// still holds something shaped like a catalog key.
+//
+// This is the precondition for the carving assertions: a volume with no residue
+// has nothing to find, and demanding a find there would turn a correct zero into
+// a failure. Two volumes make the distinction concrete. A freshly formatted one
+// has empty slack. A classic HFS volume written by hfsutils with three files on
+// it has slack full of recognisable debris — the bytes "OneDir" and "plain.txt"
+// sit there plainly — but every fragment has had its key-length byte zeroed, so
+// there is no record header left to decode and finding nothing is correct.
+// Testing for a non-zero byte would have failed that volume; testing for a key
+// header does not.
+//
+// The check is written out here rather than calling the library's parser. If
+// the library's idea of a key header were wrong, sharing it would let the bug
+// excuse the very test meant to catch it — and erring towards seeing a key
+// errs towards the hard failure below, which is the safe direction.
+func catalogLeavesWithKeyResidue(tb testing.TB, vol *Volume) int {
+	tb.Helper()
+
+	hdr, err := vol.CatalogBTreeHeader()
+	if err != nil || hdr.NodeSize == 0 {
+		return 0
+	}
+	nodeAt, err := vol.catalogNodeReader(hdr.NodeSize)
+	if err != nil {
+		return 0
+	}
+
+	// plausibleKeyAt reports whether a catalog key could start at off.
+	//
+	// Both layouts put the parent CNID at the same place: classic HFS spends
+	// one byte on the key length and one reserved, HFS+ spends two on the key
+	// length, so the four parent bytes land at offset 2 either way.
+	plausibleKeyAt := func(b []byte, off int) bool {
+		if off+8 > len(b) {
+			return false
+		}
+		var keyLen int
+		if vol.Kind() == KindHFS {
+			keyLen = int(b[off])
+		} else {
+			keyLen = int(binary.BigEndian.Uint16(b[off : off+2]))
+		}
+		if keyLen < 6 || off+keyLen > len(b) {
+			return false
+		}
+		parent := binary.BigEndian.Uint32(b[off+2 : off+6])
+		if parent == 0 {
+			return false
+		}
+		if next := vol.Header().NextCatalogID; next != 0 && parent > next {
+			return false
+		}
+		var nameLen int
+		if vol.Kind() == KindHFS {
+			nameLen = int(b[off+6])
+			return nameLen >= 1 && nameLen <= 31
+		}
+		nameLen = int(binary.BigEndian.Uint16(b[off+6 : off+8]))
+		return nameLen >= 1 && nameLen <= 255
+	}
+
+	node := make([]byte, hdr.NodeSize)
+	seen := map[uint32]struct{}{}
+	found := 0
+
+	for num := hdr.FirstLeafNode; num != 0; {
+		if _, dup := seen[num]; dup {
+			break
+		}
+		seen[num] = struct{}{}
+		if err := nodeAt(num, node); err != nil {
+			break
+		}
+		desc, err := parseBTreeNodeDescriptor(node)
+		if err != nil {
+			break
+		}
+
+		// Records grow up from the node descriptor; the offset array grows down
+		// from the end, holding NumRecords+1 entries. The gap between the end of
+		// the last live record and the start of that array is the slack.
+		n := int(desc.NumRecords)
+		arrayStart := len(node) - 2*(n+1)
+		if arrayStart < btreeNodeDescSize {
+			break
+		}
+		lastEnd := int(binary.BigEndian.Uint16(node[arrayStart : arrayStart+2]))
+		if lastEnd >= btreeNodeDescSize && lastEnd < arrayStart {
+			slack := node[lastEnd:arrayStart]
+			for off := 0; off+8 <= len(slack); off += 2 {
+				if plausibleKeyAt(slack, off) {
+					found++
+					break
+				}
+			}
+		}
+		num = desc.ForwardLink
+	}
+	return found
+}
+
 func TestCorpusRecoverDeleted(t *testing.T) {
 	vol, cleanup := corpusVolume(t)
 	defer cleanup()
@@ -30,19 +133,18 @@ func TestCorpusRecoverDeleted(t *testing.T) {
 		t.Fatalf("RecoverDeleted(with stale): %v", err)
 	}
 	if len(withStale) == 0 {
-		// Stale copies are a byproduct of leaf splits: a split moves records
-		// into a new node and HFS+ does not zero what it leaves behind in the
-		// old one. A catalog still on a single leaf has never split, so it has
-		// no residue to find, and a volume that was formatted and never
-		// written to is exactly that. Zero is then the correct answer rather
-		// than evidence of a broken scan.
+		// Residue is a byproduct of the writer leaving bytes behind — a leaf
+		// split that copies records out without zeroing the original, or a
+		// deletion that simply drops a record from the offset array. A volume
+		// where that has never happened has nothing to find, and zero is then
+		// the correct answer rather than evidence of a broken scan.
 		//
-		// Where the tree has split, finding nothing stays a hard failure. That
+		// Where there *is* residue, finding nothing stays a hard failure. That
 		// is the only check that the scan works against a real volume rather
 		// than against a fixture built from the same reading of the format as
 		// the scanner itself.
-		if bh, herr := vol.CatalogBTreeHeader(); herr == nil && bh.FirstLeafNode == bh.LastLeafNode {
-			t.Skip("catalog is still a single leaf, so no split has left records behind to carve")
+		if catalogLeavesWithKeyResidue(t, vol) == 0 {
+			t.Skip("no catalog leaf slack holds anything shaped like a key, so there is nothing to carve")
 		}
 		t.Fatal("carving found nothing at all; the scan is not working")
 	}

@@ -278,8 +278,16 @@ func orderedNodeRecords(node []byte, desc BTreeNodeDescriptor) ([][]byte, error)
 // because every descent target this package issues carries an empty name, and
 // an empty name sorts first under any comparator — so the parent CNID alone
 // decides where descent lands. Exact-match-by-name would need real collation
-// (TN1150 FastUnicodeCompare, or binary order on HFSX case-sensitive volumes);
-// findChild deliberately avoids needing it by scanning the child run instead.
+// (TN1150 FastUnicodeCompare, binary order on HFSX case-sensitive volumes, or
+// the case-insensitive Mac script comparison on classic HFS); findChild
+// deliberately avoids needing it by scanning the child run instead.
+//
+// The classic HFS case is not hypothetical. On a volume written by hfsutils one
+// directory held, in leaf order, "café.txt", "empty.txt", "renamed.txt",
+// "Reports", "© 2026.txt" — "renamed.txt" ahead of "Reports", which only
+// happens if 'r' and 'R' compare equal. Byte order would have put "Reports"
+// first. Anything that starts matching names through this comparator would
+// silently stop finding records on volumes like that one.
 func compareCatalogKeys(a, b CatalogKey) int {
 	if a.ParentCNID != b.ParentCNID {
 		if a.ParentCNID < b.ParentCNID {

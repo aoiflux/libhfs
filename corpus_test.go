@@ -3,6 +3,7 @@ package hfs
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -250,10 +251,17 @@ func TestCorpusKeyedMatchesLinear(t *testing.T) {
 		t.Skip("volume kind does not use keyed search")
 	}
 
-	var cnids []uint32
+	type node struct {
+		cnid uint32
+		dir  bool
+	}
+	var cnids []node
 	err := vol.WalkCatalog(func(r CatalogRecord) error {
-		if r.Type == CatalogRecordFile || r.Type == CatalogRecordFolder {
-			cnids = append(cnids, r.CNID)
+		switch r.Type {
+		case CatalogRecordFile:
+			cnids = append(cnids, node{r.CNID, false})
+		case CatalogRecordFolder:
+			cnids = append(cnids, node{r.CNID, true})
 		}
 		return nil
 	})
@@ -264,12 +272,25 @@ func TestCorpusKeyedMatchesLinear(t *testing.T) {
 		t.Fatal("no records found")
 	}
 
-	var compared int
-	for _, cnid := range cnids {
+	var compared, threadless, dirsCompared int
+	for _, n := range cnids {
+		cnid := n.cnid
 		keyed, kerr := vol.lookupCNIDViaThread(cnid)
 		linear, lerr := vol.lookupCNIDLinear(cnid)
 
 		if (kerr == nil) != (lerr == nil) {
+			// Classic HFS writes a thread record for every directory and, per
+			// Inside Macintosh: Files, only writes one for a file when
+			// something asks for a file ID reference. Volumes written by
+			// System 7 and by hfsutils have none at all, so the keyed path
+			// legitimately cannot see a file that the linear scan finds.
+			// HFS+ makes threads mandatory (TN1150), and a directory thread is
+			// required on every variant, so neither excuse applies to those:
+			// both stay hard failures.
+			if vol.Kind() == KindHFS && !n.dir && errors.Is(kerr, ErrNotFound) && lerr == nil {
+				threadless++
+				continue
+			}
 			t.Errorf("CNID %d: keyed err=%v, linear err=%v", cnid, kerr, lerr)
 			continue
 		}
@@ -277,6 +298,9 @@ func TestCorpusKeyedMatchesLinear(t *testing.T) {
 			continue
 		}
 		compared++
+		if n.dir {
+			dirsCompared++
+		}
 		if keyed.CNID != linear.CNID || keyed.Name != linear.Name ||
 			keyed.ParentCNID != linear.ParentCNID || keyed.Type != linear.Type ||
 			keyed.DataFork.LogicalSize != linear.DataFork.LogicalSize ||
@@ -284,9 +308,16 @@ func TestCorpusKeyedMatchesLinear(t *testing.T) {
 			t.Errorf("CNID %d disagreement:\n keyed=%+v\nlinear=%+v", cnid, keyed, linear)
 		}
 	}
-	t.Logf("compared %d records via both paths", compared)
+	t.Logf("compared %d records via both paths (%d directories); %d files had no thread record",
+		compared, dirsCompared, threadless)
 	if compared == 0 {
 		t.Fatal("no records compared; the test proved nothing")
+	}
+	// The excuse above is scoped to files. If it ever swallowed the whole
+	// volume there would be nothing left comparing keyed descent against the
+	// exhaustive walk, which is the only thing this test exists to do.
+	if threadless > 0 && dirsCompared == 0 {
+		t.Fatal("every comparison was excused as a threadless file; the test proved nothing")
 	}
 }
 

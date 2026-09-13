@@ -115,7 +115,31 @@ func (v *Volume) pathUp(cnid uint32, memo *pathMemo) (string, error) {
 
 		thr, err := v.findThreadRecord(cur)
 		if err != nil {
-			return v.failPath(cnid, chain, memo, err)
+			// Classic HFS does not require a thread record for a file. Inside
+			// Macintosh: Files makes file threads optional — one is written
+			// only when something asks for a file ID reference — while HFS+
+			// makes them mandatory (TN1150). A volume written by System 7, or
+			// by hfsutils today, carries a thread for every directory and none
+			// for any file, so without this every by-CNID path lookup on a
+			// classic volume fails for every file on it.
+			//
+			// The fallback belongs on the first hop and nowhere else: only the
+			// starting node can be a file, because every node above one in a
+			// path is a directory, and directory threads are required on all
+			// three variants. Restricting it that way also bounds the cost,
+			// since a missing thread higher up stays a fast failure rather
+			// than a catalog scan per level.
+			if cur != cnid || !errors.Is(err, ErrNotFound) {
+				return v.failPath(cnid, chain, memo, err)
+			}
+			// PathForCNID resolves the record before it climbs, and
+			// lookupCNIDRaw caches, so this is normally a cache hit rather
+			// than a second scan.
+			rec, lerr := v.lookupCNIDRaw(cur)
+			if lerr != nil || rec.Name == "" {
+				return v.failPath(cnid, chain, memo, err)
+			}
+			thr = CatalogRecord{Name: rec.Name, ParentCNID: rec.ParentCNID}
 		}
 		if thr.Name == "" {
 			return v.failPath(cnid, chain, memo,

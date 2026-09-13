@@ -3,6 +3,7 @@ package hfs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -278,6 +279,19 @@ const (
 // like a legitimately unreachable record rather than a parse error.
 func buildClassicHFSThreadImage(tb testing.TB) []byte {
 	tb.Helper()
+	return buildClassicHFSThreadImageOpt(tb, true)
+}
+
+// buildClassicHFSThreadImageOpt builds the same volume with or without a thread
+// record for the file.
+//
+// Without one is the ordinary case, not the damaged one: Inside Macintosh:
+// Files makes file threads optional on classic HFS, written only when something
+// asks for a file ID reference, so a volume from System 7 — or one written by
+// hfsutils today — has a thread for every directory and none for any file. HFS+
+// made them mandatory (TN1150), which is why no HFS+ fixture can stand in here.
+func buildClassicHFSThreadImageOpt(tb testing.TB, withFileThread bool) []byte {
+	tb.Helper()
 
 	const (
 		blockSize         = classicHFSBlockSize
@@ -319,8 +333,11 @@ func buildClassicHFSThreadImage(tb testing.TB) []byte {
 			buildThreadRecordHFS(hfsRecordTypeFolderThread, rootFolderCNID, classicThreadDirName)),
 		join(buildCatalogKeyHFSBytes(classicThreadDirCNID, []byte(classicThreadFileNm)),
 			buildFileRecordHFS(classicThreadFilCNID, tf)),
-		join(buildCatalogKeyHFSBytes(classicThreadFilCNID, nil),
-			buildThreadRecordHFS(hfsRecordTypeFileThread, classicThreadDirCNID, classicThreadFileNm)),
+	}
+	if withFileThread {
+		records = append(records,
+			join(buildCatalogKeyHFSBytes(classicThreadFilCNID, nil),
+				buildThreadRecordHFS(hfsRecordTypeFileThread, classicThreadDirCNID, classicThreadFileNm)))
 	}
 
 	writeNode := func(num uint32, node []byte) {
@@ -332,6 +349,55 @@ func buildClassicHFSThreadImage(tb testing.TB) []byte {
 	writeNode(leafNode, makeNode(nodeSize, btreeNodeTypeLeaf, records))
 
 	return img
+}
+
+// A classic HFS file usually has no thread record at all, and its path must
+// still resolve.
+//
+// This is the common case on classic volumes rather than a damaged one, and it
+// is invisible to every other fixture in the repo: they all write a thread for
+// the file because HFS+ requires one. Measured on a volume written by hfsutils,
+// 367 of 367 files had no thread record, so before this the library could not
+// name the path of a single file on it.
+//
+// PathForCNID climbs thread records. Only the first hop can be a file — every
+// node above one is a directory, and directory threads are required on all
+// three variants — so the fallback needed is exactly one record deep.
+func TestClassicHFSPathWithoutFileThread(t *testing.T) {
+	img := buildClassicHFSThreadImageOpt(t, false)
+	vol, err := Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// The premise: the thread really is absent, so the test cannot be passing
+	// by accident on a fixture that still carries one.
+	if _, err := vol.findThreadRecord(classicThreadFilCNID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("findThreadRecord(%d) = %v, want ErrNotFound; the fixture still has a file thread",
+			classicThreadFilCNID, err)
+	}
+
+	wantPath := "/" + classicThreadDirName + "/" + classicThreadFileNm
+	got, err := vol.PathForCNID(classicThreadFilCNID)
+	if err != nil {
+		t.Fatalf("PathForCNID(%d): %v", classicThreadFilCNID, err)
+	}
+	if got != wantPath {
+		t.Errorf("PathForCNID = %q, want %q", got, wantPath)
+	}
+
+	// The directory above it still resolves through its own thread record, so
+	// the fallback has not quietly replaced the normal climb.
+	dirPath := "/" + classicThreadDirName
+	if got, err := vol.PathForCNID(classicThreadDirCNID); err != nil || got != dirPath {
+		t.Errorf("PathForCNID(dir) = %q, %v; want %q, nil", got, err, dirPath)
+	}
+
+	// A CNID that is on no record at all must still fail. The fallback widens
+	// what can be found, and must not turn a miss into an answer.
+	if _, err := vol.PathForCNID(9999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("PathForCNID(9999) = %v, want ErrNotFound", err)
+	}
 }
 
 // A classic HFS thread record answers "who is my parent, and what am I called".

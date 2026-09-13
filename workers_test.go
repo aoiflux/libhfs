@@ -323,11 +323,12 @@ func TestCorpusCarvingDeterministicAcrossWorkerCounts(t *testing.T) {
 	}
 	t.Logf("sequential carve found %d records", len(sequential))
 	if len(sequential) == 0 {
-		// A catalog still on a single leaf has nothing to carve, so the worker
-		// counts below would agree by all finding nothing. See
-		// TestCorpusRecoverDeleted for why a split tree must yield records.
-		if bh, herr := vol.CatalogBTreeHeader(); herr == nil && bh.FirstLeafNode == bh.LastLeafNode {
-			t.Skip("catalog is still a single leaf, so there is nothing for the worker counts to disagree about")
+		// A volume whose leaves hold no residue has nothing to carve, so the
+		// worker counts below would agree by all finding nothing. See
+		// TestCorpusRecoverDeleted for why a volume that has residue must
+		// yield records.
+		if catalogLeavesWithKeyResidue(t, vol) == 0 {
+			t.Skip("no catalog leaf slack holds anything shaped like a key, so there is nothing for the worker counts to disagree about")
 		}
 		t.Fatal("no records found; the comparison below would prove nothing")
 	}
