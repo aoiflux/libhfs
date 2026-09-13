@@ -662,7 +662,7 @@ func TestHardLinkFallsBackToCNIDLookup(t *testing.T) {
 
 	// The premise: the name lookup really must fail here, or this test is just
 	// the previous one again.
-	if _, ok := vol.findInodeByName(colInodeCNID); ok {
+	if _, ok := vol.findInodeByName(colInodeCNID, LinkHardFile); ok {
 		t.Fatalf("an iNode%d record was found; the fallback is not what resolved this",
 			colInodeCNID)
 	}
@@ -688,15 +688,15 @@ func TestHardLinkWithoutPrivateDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if _, ok := vol.privateDataDirCNID(); !ok {
+	if _, ok := vol.privateDirCNID(storeFileLinks); !ok {
 		t.Skip("fixture has no private directory; nothing to contrast")
 	}
 
 	// Confirm the cache returns a stable answer rather than rescanning to a
 	// different one, since every hard link on a volume goes through it.
-	first, ok1 := vol.privateDataDirCNID()
-	second, ok2 := vol.privateDataDirCNID()
+	first, ok1 := vol.privateDirCNID(storeFileLinks)
+	second, ok2 := vol.privateDirCNID(storeFileLinks)
 	if first != second || ok1 != ok2 {
-		t.Errorf("privateDataDirCNID returned (%d,%v) then (%d,%v)", first, ok1, second, ok2)
+		t.Errorf("privateDirCNID returned (%d,%v) then (%d,%v)", first, ok1, second, ok2)
 	}
 }

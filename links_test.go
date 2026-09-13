@@ -7,29 +7,51 @@ func TestClassifyLink(t *testing.T) {
 		name         string
 		ftype, fcrea uint32
 		mode         uint16
+		flags        uint16
 		isDir        bool
 		want         LinkKind
 	}{
-		{"plain file", 0x54455854, 0x21526368, sIFREG | 0o644, false, LinkNone},
-		{"plain folder", 0, 0, sIFDIR | 0o755, true, LinkNone},
-		{"hard file link", finderTypeHardLink, finderCreatorHFSPlus, sIFREG, false, LinkHardFile},
-		{"dir hard link", finderTypeDirLink, finderCreatorMacS, sIFDIR, true, LinkHardDir},
-		{"symlink by finder", finderTypeSymlink, finderCreatorSymlink, sIFLNK, false, LinkSymbolic},
-		{"symlink by mode only", 0, 0, sIFLNK | 0o777, false, LinkSymbolic},
-		// A folder whose mode happens to carry the symlink bits is not a
-		// symlink; only the Finder pair can make a directory a link.
-		{"folder with link mode", 0, 0, sIFLNK, true, LinkNone},
+		{"plain file", 0x54455854, 0x21526368, sIFREG | 0o644, 0, false, LinkNone},
+		{"plain folder", 0, 0, sIFDIR | 0o755, 0, true, LinkNone},
+		{"hard file link", finderTypeHardLink, finderCreatorHFSPlus, sIFREG, hfsHasLinkChainMask, false, LinkHardFile},
+		// A pre-Leopard file inode has no link chain, and createindirectlink
+		// clears the bit for one. The file-link test must not require it.
+		{"hard file link without chain bit", finderTypeHardLink, finderCreatorHFSPlus, sIFREG, 0, false, LinkHardFile},
+
+		// A directory hard link is a file record carrying the alias Finder
+		// pair plus kHFSHasLinkChainMask. Apple's createindirectlink sets
+		// ca_mode to S_IFREG for it, so S_IFDIR here would be the stub of
+		// something macOS never writes.
+		{"dir hard link", finderTypeDirLink, finderCreatorMacS, sIFREG, hfsHasLinkChainMask, false, LinkHardDir},
+
+		// The same Finder pair without the chain bit is an ordinary Finder
+		// alias file: a user document that names another path, not a link the
+		// filesystem resolves. Treating it as a hard link would send a reader
+		// to the private directory for an inode that was never created.
+		{"finder alias is not a dir link", finderTypeDirLink, finderCreatorMacS, sIFREG, 0, false, LinkNone},
+
+		{"symlink by finder", finderTypeSymlink, finderCreatorSymlink, sIFLNK, 0, false, LinkSymbolic},
+		{"symlink by mode only", 0, 0, sIFLNK | 0o777, 0, false, LinkSymbolic},
+
+		// A folder record is never a link stub, whatever it carries. Its
+		// userInfo is an FndrDirInfo whose first eight bytes are window
+		// bounds, so these pairs are coordinates that happen to spell a
+		// Finder type and creator.
+		{"folder with link mode", 0, 0, sIFLNK, 0, true, LinkNone},
+		{"folder with dir-link pair", finderTypeDirLink, finderCreatorMacS, sIFDIR, hfsHasLinkChainMask, true, LinkNone},
+		{"folder with file-link pair", finderTypeHardLink, finderCreatorHFSPlus, sIFDIR, hfsHasLinkChainMask, true, LinkNone},
+
 		// Half a Finder pair is not a link.
-		{"type without creator", finderTypeHardLink, 0, sIFREG, false, LinkNone},
-		{"creator without type", 0, finderCreatorHFSPlus, sIFREG, false, LinkNone},
+		{"type without creator", finderTypeHardLink, 0, sIFREG, 0, false, LinkNone},
+		{"creator without type", 0, finderCreatorHFSPlus, sIFREG, 0, false, LinkNone},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyLink(tc.ftype, tc.fcrea, tc.mode, tc.isDir)
+			got := classifyLink(tc.ftype, tc.fcrea, tc.mode, tc.flags, tc.isDir)
 			if got != tc.want {
-				t.Errorf("classifyLink(%#x, %#x, %#o, dir=%v) = %v, want %v",
-					tc.ftype, tc.fcrea, tc.mode, tc.isDir, got, tc.want)
+				t.Errorf("classifyLink(%#x, %#x, %#o, flags=%#x, dir=%v) = %v, want %v",
+					tc.ftype, tc.fcrea, tc.mode, tc.flags, tc.isDir, got, tc.want)
 			}
 		})
 	}

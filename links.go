@@ -12,7 +12,27 @@ const (
 	finderTypeSymlink     = uint32(0x736C6E6B) // "slnk"
 	finderCreatorSymlink  = uint32(0x72686170) // "rhap"
 	privateDataDirNameSub = "HFS+ Private"
+
+	// dirLinkDirNameSub identifies the directory-hard-link store. Apple names
+	// it HFSPLUS_DIR_METADATA_FOLDER: ".HFS+ Private Directory Data" with a
+	// trailing carriage return (0x0D), a leading dot, and no NUL prefix, unlike
+	// the file store. Matching on a substring keeps both out of reach of the
+	// exact bytes, which differ between what the kernel writes and what a
+	// UTF-16 decoder renders.
+	dirLinkDirNameSub = "HFS+ Private Directory Data"
+
+	// inodeNamePrefix and dirInodeNamePrefix are HFS_INODE_PREFIX and
+	// HFS_DIRINODE_PREFIX. Each is followed by the link reference in decimal
+	// with no leading zeros — "iNode4711", "dir_555".
+	inodeNamePrefix    = "iNode"
+	dirInodeNamePrefix = "dir_"
 )
+
+// hfsHasLinkChainMask is kHFSHasLinkChainMask in the catalog record's flags
+// field: the record is part of a hard-link chain, as either a link or an
+// inode. It is what separates a directory hard link from an ordinary Finder
+// alias, which carries the same Finder type and creator.
+const hfsHasLinkChainMask = uint16(0x0020)
 
 // File mode bits from the BSD stat(2) layout, as stored in HFSPlusBSDInfo.
 const (
@@ -99,20 +119,49 @@ func parseBSDInfo(payload []byte) BSDInfo {
 }
 
 // classifyLink determines a record's link kind from its Finder type/creator
-// pair and file mode.
+// pair, file mode and record flags.
 //
 // The Finder pair is the authoritative marker: macOS sets it when creating the
 // link, and it survives even when the mode bits do not. The mode check is a
 // fallback for symlinks written by tools that set only the POSIX metadata.
-func classifyLink(finderType, finderCreator uint32, mode uint16, isDir bool) LinkKind {
+//
+// Two rules here are easy to get wrong and are taken from Apple's own
+// classification in hfs_catalog.c rather than from the Finder pair alone.
+//
+// A link stub is always a *file* record, never a folder — including a link to
+// a directory. hfs_link.c's createindirectlink sets ca_mode to S_IFREG for
+// both kinds and the record is created by cat_createlink, and every test
+// Apple makes is guarded by S_ISREG. A folder record therefore cannot be a
+// link, which matters because a folder's userInfo is an FndrDirInfo whose
+// first eight bytes are window bounds rather than a type/creator pair: a
+// folder whose Finder window happens to sit at the coordinates spelling
+// "fdrp"/"MACS" would otherwise be reported as a directory hard link.
+//
+// A directory hard link additionally requires kHFSHasLinkChainMask. Its
+// Finder pair, kHFSAliasType/kHFSAliasCreator, is shared with every ordinary
+// Finder alias file pointing at a folder, and an alias is not a hard link —
+// it is a user document whose contents happen to name another path. Apple
+// requires the flag for exactly this reason:
+//
+//	is_dirlink = (file->flags & kHFSHasLinkChainMask) &&
+//	             (SWAP_BE32(file->userInfo.fdType) == kHFSAliasType) &&
+//	             (SWAP_BE32(file->userInfo.fdCreator) == kHFSAliasCreator);
+//
+// The file-link test needs no such guard: "hlnk"/"hfs+" is not a pair any
+// user-visible document carries.
+func classifyLink(finderType, finderCreator uint32, mode, flags uint16, isDir bool) LinkKind {
+	if isDir {
+		return LinkNone
+	}
 	switch {
 	case finderType == finderTypeHardLink && finderCreator == finderCreatorHFSPlus:
 		return LinkHardFile
-	case finderType == finderTypeDirLink && finderCreator == finderCreatorMacS:
+	case finderType == finderTypeDirLink && finderCreator == finderCreatorMacS &&
+		flags&hfsHasLinkChainMask != 0:
 		return LinkHardDir
 	case finderType == finderTypeSymlink && finderCreator == finderCreatorSymlink:
 		return LinkSymbolic
-	case !isDir && mode&sIFMT == sIFLNK:
+	case mode&sIFMT == sIFLNK:
 		return LinkSymbolic
 	}
 	return LinkNone

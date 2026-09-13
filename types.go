@@ -93,16 +93,23 @@ type Volume struct {
 	maxAlloc     int64
 	carveWorkers int
 
-	// privDirCNID caches the hard-link store's CNID, and privDirLooked records
-	// that the search has been made — including when it found nothing, so a
-	// volume without one does not rescan its root for every link.
-	privDirCNID   uint32
-	privDirFound  bool
-	privDirLooked bool
+	// privDirs caches where each hard-link store lives, indexed by
+	// hardLinkStore. looked records that the search has been made — including
+	// when it found nothing, so a volume without a given store does not
+	// rescan its root for every link.
+	privDirs [numHardLinkStores]privDirCache
 
 	// codecs holds decmpfs decoders scoped to this volume. It carries its own
 	// lock, so it is not guarded by mu.
 	codecs codecRegistry
+}
+
+// privDirCache is one cached private-directory lookup. found and looked are
+// distinct: a store that is genuinely absent must be remembered as absent.
+type privDirCache struct {
+	cnid   uint32
+	found  bool
+	looked bool
 }
 
 type BTreeNodeDescriptor struct {

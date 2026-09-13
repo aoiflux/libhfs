@@ -70,6 +70,12 @@ type VolumeSummary struct {
 	Kind    string `json:"kind"`
 	Version uint16 `json:"version"`
 
+	// Name is the volume's name. It is empty when the volume has none that
+	// could be read — a classic HFS volume with a zero-length drVN, or an
+	// HFS+ volume whose root catalog record is unreachable — rather than the
+	// report failing over a cosmetic field. See [Volume.VolumeName].
+	Name string `json:"name"`
+
 	// Identifier is the 64-bit value stored in the volume header, as hex, and
 	// UUID is the RFC 4122 string macOS derives from it. They are different
 	// values; see [VolumeIdentifier]. Both are empty when the volume carries
@@ -254,6 +260,13 @@ func (v *Volume) volumeSummary() VolumeSummary {
 	if id, err := v.VolumeIdentifier(); err == nil {
 		out.Identifier = id.String()
 		out.UUID = id.UUID()
+	}
+	// A volume with no readable name still gets a report: the name is how a
+	// reader recognises the volume, but it is not what the report is for, and
+	// a damaged catalog is the case where the rest of these numbers matter
+	// most.
+	if name, err := v.VolumeName(); err == nil {
+		out.Name = name
 	}
 	return out
 }

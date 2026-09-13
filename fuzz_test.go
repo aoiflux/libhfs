@@ -38,6 +38,9 @@ func FuzzOpen(f *testing.F) {
 	// records, so nothing reaches the resolution loop that follows one record
 	// to another.
 	f.Add(buildLinkImage(f))
+	// Both private hard-link stores on one volume, so the fuzzer can corrupt
+	// the directory-link path as well as the file-link one.
+	f.Add(buildDirLinkImage(f, dlOpts{stubFlags: hfsHasLinkChainMask}))
 	f.Add(make([]byte, volumeHeaderOffset+volumeHeaderSize))
 	f.Add([]byte("not a filesystem"))
 

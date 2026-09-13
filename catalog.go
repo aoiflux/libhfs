@@ -78,10 +78,10 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 		rec.FinderType = be32(payload[catFileType : catFileType+4])
 		rec.FinderCreator = be32(payload[catFileCreator : catFileCreator+4])
 		copy(rec.FinderInfo[:], payload[catFinderBlock:catFinderBlock+catFinderBlockSize])
-		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, true)
-		if rec.Link == LinkHardDir {
-			rec.LinkTarget = rec.Perms.Special
-		}
+		// A folder record is never a link stub — not even the stub of a link
+		// to a directory, which macOS stores as a file record. classifyLink
+		// says why; passing isDir here keeps that rule in one place.
+		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, be16(payload[catFlags:catFlags+2]), true)
 		return rec, nil
 	case catalogRecordFile:
 		if len(payload) < catFolderRecordSize {
@@ -94,8 +94,11 @@ func decodeCatalogRecord(key CatalogKey, payload []byte) (CatalogRecord, error) 
 		rec.FinderType = be32(payload[catFileType : catFileType+4])
 		rec.FinderCreator = be32(payload[catFileCreator : catFileCreator+4])
 		copy(rec.FinderInfo[:], payload[catFinderBlock:catFinderBlock+catFinderBlockSize])
-		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, false)
-		if rec.Link == LinkHardFile {
+		rec.Link = classifyLink(rec.FinderType, rec.FinderCreator, rec.Perms.FileMode, be16(payload[catFlags:catFlags+2]), false)
+		if rec.Link == LinkHardFile || rec.Link == LinkHardDir {
+			// Both kinds keep the link reference in the same union field,
+			// HFSPlusBSDInfo.special.iNodeNum, which Apple reads as
+			// hl_linkReference for a file link and ca_linkref for either.
 			rec.LinkTarget = rec.Perms.Special
 		}
 		if len(payload) >= catRsrcFork {
@@ -216,7 +219,7 @@ func (r CatalogRecord) hardLinkTargetCNID() uint32 {
 	if r.Type != CatalogRecordFile {
 		return 0
 	}
-	if r.Link != LinkHardFile {
+	if r.Link != LinkHardFile && r.Link != LinkHardDir {
 		return 0
 	}
 	return r.LinkTarget
@@ -408,39 +411,47 @@ func (v *Volume) lookupCNIDLinear(cnid uint32) (CatalogRecord, error) {
 	return CatalogRecord{}, ErrNotFound
 }
 
+// resolveHardLinkRecord replaces a hard-link stub with the inode it names.
+//
+// Resolution is a single hop, and deliberately so. It matches Apple's
+// cat_resolvelink, which performs one B-tree search and returns; an inode is
+// never itself a link, so there is no chain to walk. A cycle cannot arise even
+// on a deliberately malformed volume: the record handed back always carries
+// LinkTarget equal to its own CNID, which is the "nothing further to follow"
+// condition tested at the top. An inode that claims to be a link is therefore
+// returned as it stands rather than followed — the conservative answer, and
+// the one an examiner can reason about, since following it would report one
+// file's content under another file's name.
+//
+// A loop with a visited set stood here until 2026-09-13. It could not execute
+// its second iteration for the reason above, so its cycle-detection branch was
+// unreachable and untestable; TestHardLinkInodeClaimingToBeALink pins the
+// behaviour that made it redundant.
 func (v *Volume) resolveHardLinkRecord(rec CatalogRecord) (CatalogRecord, error) {
-	seen := map[uint32]struct{}{}
-	resolved := rec
-
-	for {
-		targetCNID := resolved.hardLinkTargetCNID()
-		if targetCNID == 0 || targetCNID == resolved.CNID {
-			return resolved, nil
-		}
-		if _, ok := seen[targetCNID]; ok {
-			return CatalogRecord{}, &ParseError{Op: "resolve_hard_link", Offset: int64(targetCNID), Err: ErrCorrupt}
-		}
-		seen[targetCNID] = struct{}{}
-
-		target, err := v.lookupHardLinkInode(targetCNID)
-		if err != nil {
-			return CatalogRecord{}, err
-		}
-		// The resolved record reports the target's content under the link's
-		// identity. The link facts are carried across rather than discarded, so
-		// a caller can still tell this was reached through a hard link and how
-		// many links share the inode — on the inode, the BSD special field is
-		// the link count.
-		target.Name = rec.Name
-		target.ParentCNID = rec.ParentCNID
-		target.Link = resolved.Link
-		// The inode's own CNID, which is normally the same number as the stub's
-		// iNodeNum but is not guaranteed to be — see lookupHardLinkInode. The
-		// raw iNodeNum stays available as Perms.Special and LinkID.
-		target.LinkTarget = target.CNID
-		target.LinkCount = target.Perms.Special
-		resolved = target
+	targetCNID := rec.hardLinkTargetCNID()
+	if targetCNID == 0 || targetCNID == rec.CNID {
+		return rec, nil
 	}
+
+	target, err := v.lookupHardLinkInode(targetCNID, rec.Link)
+	if err != nil {
+		return CatalogRecord{}, err
+	}
+
+	// The resolved record reports the target's content under the link's
+	// identity. The link facts are carried across rather than discarded, so a
+	// caller can still tell this was reached through a hard link and how many
+	// links share the inode — on the inode, the BSD special field is the link
+	// count, for a directory inode exactly as for a file one.
+	target.Name = rec.Name
+	target.ParentCNID = rec.ParentCNID
+	target.Link = rec.Link
+	// The inode's own CNID, which is normally the same number as the stub's
+	// iNodeNum but is not guaranteed to be — see lookupHardLinkInode. The raw
+	// iNodeNum stays available as Perms.Special and LinkID.
+	target.LinkTarget = target.CNID
+	target.LinkCount = target.Perms.Special
+	return target, nil
 }
 
 // lookupHardLinkInode finds the inode a hard-link stub names.
@@ -463,21 +474,49 @@ func (v *Volume) resolveHardLinkRecord(rec CatalogRecord) (CatalogRecord, error)
 // So the name lookup is authoritative and the CNID is the fallback, which also
 // keeps volumes whose private directory is missing or damaged working exactly
 // as they did before.
-func (v *Volume) lookupHardLinkInode(iNodeNum uint32) (CatalogRecord, error) {
-	if rec, ok := v.findInodeByName(iNodeNum); ok {
+func (v *Volume) lookupHardLinkInode(iNodeNum uint32, kind LinkKind) (CatalogRecord, error) {
+	if rec, ok := v.findInodeByName(iNodeNum, kind); ok {
 		return rec, nil
 	}
 	return v.lookupCNIDRaw(iNodeNum)
 }
 
 // findInodeByName looks for "iNode<n>" inside the private metadata directory.
-func (v *Volume) findInodeByName(iNodeNum uint32) (CatalogRecord, bool) {
-	parent, ok := v.privateDataDirCNID()
+// findInodeByName looks an inode up the way the kernel does: by name, in the
+// private store that matches the kind of link asking for it.
+//
+// The two stores are separate directories with separate naming schemes, and a
+// number valid in one means nothing in the other — "dir_555" and "iNode555"
+// are different objects. Apple's cat_resolvelink picks between them on the
+// same boolean this switches on:
+//
+//	if (isdirlink) {
+//	        MAKE_DIRINODE_NAME(inodename, sizeof(inodename), (unsigned int)linkref);
+//	        parentcnid = hfsmp->hfs_private_desc[DIR_HARDLINKS].cd_cnid;
+//	} else {
+//	        MAKE_INODE_NAME(inodename, sizeof(inodename), (unsigned int)linkref);
+//	        parentcnid = hfsmp->hfs_private_desc[FILE_HARDLINKS].cd_cnid;
+//	}
+//
+// A directory inode is a folder record and a file inode is a file record, so
+// the record type is checked as well: a name match of the wrong type is a
+// collision, not the target.
+func (v *Volume) findInodeByName(iNodeNum uint32, kind LinkKind) (CatalogRecord, bool) {
+	store := storeFileLinks
+	prefix := inodeNamePrefix
+	wantType := CatalogRecordFile
+	if kind == LinkHardDir {
+		store = storeDirLinks
+		prefix = dirInodeNamePrefix
+		wantType = CatalogRecordFolder
+	}
+
+	parent, ok := v.privateDirCNID(store)
 	if !ok {
 		return CatalogRecord{}, false
 	}
 
-	want := "iNode" + strconv.FormatUint(uint64(iNodeNum), 10)
+	want := prefix + strconv.FormatUint(uint64(iNodeNum), 10)
 	var found CatalogRecord
 	var ok2 bool
 	err := v.walkCatalogChildren(parent, func(key CatalogKey, payload []byte) error {
@@ -485,7 +524,7 @@ func (v *Volume) findInodeByName(iNodeNum uint32) (CatalogRecord, bool) {
 			return nil
 		}
 		r, err := v.decodeCatalogRecord(key, payload)
-		if err != nil || r.Type != CatalogRecordFile {
+		if err != nil || r.Type != wantType {
 			return nil
 		}
 		found, ok2 = r, true
@@ -497,38 +536,68 @@ func (v *Volume) findInodeByName(iNodeNum uint32) (CatalogRecord, bool) {
 	return found, ok2
 }
 
-// privateDataDirCNID finds the hard-link store in the volume root.
+// hardLinkStore names one of the two private directories HFS+ keeps at the
+// volume root: one for file inodes, one for directory inodes.
+type hardLinkStore uint8
+
+const (
+	// storeFileLinks is HFSPLUSMETADATAFOLDER, whose name begins with four
+	// NUL characters so that it cannot be typed.
+	storeFileLinks hardLinkStore = iota
+
+	// storeDirLinks is HFSPLUS_DIR_METADATA_FOLDER. It exists only on volumes
+	// that have carried a directory hard link — in practice, Time Machine
+	// destinations.
+	storeDirLinks
+
+	numHardLinkStores
+)
+
+// privateDirCNID finds one of the two hard-link stores in the volume root.
 //
-// Its real name begins with four NUL bytes so that it cannot be typed, and
-// isSystemFile keys off the same substring this does.
-func (v *Volume) privateDataDirCNID() (uint32, bool) {
-	// Cached because a volume with many hard links — a Time Machine backup is
-	// the normal case — would otherwise rescan the root for every one of them.
-	// The lock is dropped before walking, so at worst two callers race and both
-	// do the search; holding it across walkCatalogChildren would deadlock
-	// against the node cache.
+// Both results are cached, including the negative one: a volume with many
+// hard links — a Time Machine backup is the normal case — would otherwise
+// rescan the root for every one of them, and a volume with no directory links
+// at all would rescan it for every file link that misses. The lock is dropped
+// before walking, so at worst two callers race and both do the search; holding
+// it across walkCatalogChildren would deadlock against the node cache.
+func (v *Volume) privateDirCNID(store hardLinkStore) (uint32, bool) {
 	v.mu.RLock()
-	looked, cnid, found := v.privDirLooked, v.privDirCNID, v.privDirFound
+	c := v.privDirs[store]
 	v.mu.RUnlock()
-	if looked {
-		return cnid, found
+	if c.looked {
+		return c.cnid, c.found
 	}
 
-	cnid, found = v.findPrivateDataDir()
+	cnid, found := v.findPrivateDir(store)
 
 	v.mu.Lock()
-	v.privDirCNID, v.privDirFound, v.privDirLooked = cnid, found, true
+	v.privDirs[store] = privDirCache{cnid: cnid, found: found, looked: true}
 	v.mu.Unlock()
 	return cnid, found
 }
 
-func (v *Volume) findPrivateDataDir() (uint32, bool) {
+// findPrivateDir scans the volume root for one store.
+//
+// Both names contain "HFS+ Private", so the file store has to be identified by
+// what it is *not*: the directory store's name contains the file store's
+// substring, but not the other way round. isSystemFile keys off the same
+// substring, which is why neither directory is reported as user content.
+func (v *Volume) findPrivateDir(store hardLinkStore) (uint32, bool) {
 	var cnid uint32
 	var ok bool
 	err := v.walkCatalogChildren(rootFolderCNID, func(key CatalogKey, payload []byte) error {
 		name := key.NameString()
-		if !strings.Contains(name, privateDataDirNameSub) || strings.Contains(name, "Directory Data") {
-			return nil
+		isDirStore := strings.Contains(name, dirLinkDirNameSub)
+		switch store {
+		case storeDirLinks:
+			if !isDirStore {
+				return nil
+			}
+		default:
+			if isDirStore || !strings.Contains(name, privateDataDirNameSub) {
+				return nil
+			}
 		}
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil || r.Type != CatalogRecordFolder {
@@ -728,6 +797,14 @@ func (v *Volume) WalkDir(path string, cb func(DirEntry) error) error {
 	return v.WalkDirCNID(rec.CNID, cb)
 }
 
+// WalkDirCNID invokes cb for each entry of the directory with this CNID.
+//
+// A directory hard link is followed: the listing is the target directory's,
+// because OpenCNID resolves the stub and the children are then read from the
+// resolved CNID rather than the one passed in. Reading them from the stub
+// instead would report an empty directory, since a link stub has no children
+// of its own — a silent wrong answer where the pre-resolution behaviour was at
+// least an honest ErrNotDir. Use OpenCNIDRaw to see the stub itself.
 func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 	rec, err := v.OpenCNID(cnid)
 	if err != nil {
@@ -740,13 +817,14 @@ func (v *Volume) WalkDirCNID(cnid uint32, cb func(DirEntry) error) error {
 		return nil
 	}
 
-	err = v.walkCatalogChildren(cnid, func(key CatalogKey, payload []byte) error {
+	parent := rec.CNID
+	err = v.walkCatalogChildren(parent, func(key CatalogKey, payload []byte) error {
 		r, err := v.decodeCatalogRecord(key, payload)
 		if err != nil {
 			v.noteDecodeFailure("catalog_decode", key.ParentCNID)
 			return nil
 		}
-		if r.ParentCNID != cnid {
+		if r.ParentCNID != parent {
 			return nil
 		}
 		if r.Type != CatalogRecordFolder && r.Type != CatalogRecordFile {
