@@ -29,6 +29,15 @@ func FuzzOpen(f *testing.F) {
 	f.Add(buildClassicHFSTimesImage(f))
 	f.Add(buildXAttrImage(f))
 	f.Add(buildWrappedHFSPlusImage(f))
+	// A volume whose extents B-tree header names a root node the tree does not
+	// contain. No corpus image has that shape, and it is the one that sends
+	// fork resolution down the degradation fallback.
+	f.Add(buildClassicHFSOverflowImage(f, 99))
+	// A volume whose records point at each other: a hard-link stub, the inode
+	// it names, and two symlinks. Every other seed is a tree of self-contained
+	// records, so nothing reaches the resolution loop that follows one record
+	// to another.
+	f.Add(buildLinkImage(f))
 	f.Add(make([]byte, volumeHeaderOffset+volumeHeaderSize))
 	f.Add([]byte("not a filesystem"))
 
@@ -53,6 +62,9 @@ func FuzzOpen(f *testing.F) {
 		_, _ = vol.ResourceForkRanges(rootFolderCNID)
 		_, _ = vol.VolumeIdentifier()
 		_, _ = vol.UUID()
+		// VolumeName reads a length-prefixed field out of the MDB on classic
+		// HFS, so it is the kind of thing an adversarial length byte breaks.
+		_, _ = vol.VolumeName()
 		_ = vol.WalkPaths(func(string, CatalogRecord) error { return nil })
 		// Report(nil) omits the file listing by default, which is what keeps
 		// this affordable to fuzz; the listing itself is covered separately.
@@ -144,6 +156,11 @@ func FuzzDecmpfs(f *testing.F) {
 	f.Add(buildDecmpfsAttr(CompressionRawInline, 4, []byte("data")), uint64(4))
 	f.Add([]byte("fpmc"), uint64(0))
 	f.Add([]byte{}, uint64(1<<40))
+	// A well-formed resource fork, so the fork branch below starts from an
+	// input with a real chunk table. Every other seed here is an inline
+	// attribute or junk, and those die at decodeDecmpfsResourceFork's first
+	// length guard, leaving the chunk-table arithmetic unreached.
+	f.Add(buildDecmpfsResourceFork(f, bytes.Repeat([]byte("chunk payload; "), 40)), uint64(600))
 
 	f.Fuzz(func(t *testing.T, attr []byte, size uint64) {
 		vol := &Volume{maxAlloc: 1 << 20}

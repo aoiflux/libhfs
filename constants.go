@@ -37,6 +37,12 @@ const (
 	// with drNmFls (12) and drNmRtDirs (82), which count only what lies in the
 	// root directory and are 16-bit; reading those instead yields a number that
 	// is plausible, small and wrong on every volume with subdirectories.
+	// hfsMDBOffVolumeName is drVN: a Str27 holding the volume's name as one
+	// length byte followed by up to 27 bytes of MacRoman. HFS+ has no
+	// equivalent field — there the name lives only in the root catalog record.
+	hfsMDBOffVolumeName = 36
+	hfsMDBVolumeNameMax = 27
+
 	hfsMDBOffFileCount   = 84
 	hfsMDBOffFolderCount = 88
 	hfsMDBOffFinderInfo  = 92

@@ -93,6 +93,13 @@ type Volume struct {
 	maxAlloc     int64
 	carveWorkers int
 
+	// privDirCNID caches the hard-link store's CNID, and privDirLooked records
+	// that the search has been made — including when it found nothing, so a
+	// volume without one does not rescan its root for every link.
+	privDirCNID   uint32
+	privDirFound  bool
+	privDirLooked bool
+
 	// codecs holds decmpfs decoders scoped to this volume. It carries its own
 	// lock, so it is not guarded by mu.
 	codecs codecRegistry

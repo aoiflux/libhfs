@@ -109,10 +109,24 @@ dd if=/dev/zero of="$IMG" bs=1M count=48 status=none
 "$BIN/hcopy" -r "$SRC/big.bin"   :Docs:Reports:2026:deep.bin
 "$BIN/hcopy" -r "$SRC/huge.bin"  :Media:huge.bin
 
-# 0xE9 is MacRoman e-acute, 0xA9 the copyright sign. Both decode to the wrong
-# code point if the name bytes are widened instead of mapped.
-"$BIN/hcopy" -r "$SRC/tiny.txt" ":Docs:caf\351.txt"
-"$BIN/hcopy" -r "$SRC/tiny.txt" ":Docs:\251 2026.txt"
+# Two high-bit MacRoman bytes, which decode to the wrong code point if the name
+# bytes are widened instead of mapped through the table.
+#
+# 0xE9 is E-GRAVE (U+00C8), not e-acute: this comment used to say e-acute
+# because U+00E9 *is* e-acute, but that is the Unicode code point, and the
+# MacRoman byte for it is 0x8E. 0xA9 is the copyright sign, which happens to
+# match its Unicode point. Both are equally good test material — what matters is
+# that they are above 0x7F — so the names are left as they are rather than
+# regenerated to look tidier.
+#
+# The octal must come from printf. Written as "\351" inside double quotes, sh
+# passes a literal backslash-three-five-one, so the volume ends up with an
+# eight-character ASCII name and the decoder never meets a high-bit byte at all.
+# That is what this script did until 2026-09-13, which is why the MacRoman table
+# had no corpus coverage despite the comment above claiming it did; the
+# cross-check in oracle_test.go is what surfaced it.
+"$BIN/hcopy" -r "$SRC/tiny.txt" "$(printf ':Docs:caf\351.txt')"
+"$BIN/hcopy" -r "$SRC/tiny.txt" "$(printf ':Docs:\251 2026.txt')"
 
 i=0
 while [ $i -lt 400 ]; do

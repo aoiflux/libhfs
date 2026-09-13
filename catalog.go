@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 )
@@ -421,7 +422,7 @@ func (v *Volume) resolveHardLinkRecord(rec CatalogRecord) (CatalogRecord, error)
 		}
 		seen[targetCNID] = struct{}{}
 
-		target, err := v.lookupCNIDRaw(targetCNID)
+		target, err := v.lookupHardLinkInode(targetCNID)
 		if err != nil {
 			return CatalogRecord{}, err
 		}
@@ -433,10 +434,113 @@ func (v *Volume) resolveHardLinkRecord(rec CatalogRecord) (CatalogRecord, error)
 		target.Name = rec.Name
 		target.ParentCNID = rec.ParentCNID
 		target.Link = resolved.Link
-		target.LinkTarget = targetCNID
+		// The inode's own CNID, which is normally the same number as the stub's
+		// iNodeNum but is not guaranteed to be — see lookupHardLinkInode. The
+		// raw iNodeNum stays available as Perms.Special and LinkID.
+		target.LinkTarget = target.CNID
 		target.LinkCount = target.Perms.Special
 		resolved = target
 	}
+}
+
+// lookupHardLinkInode finds the inode a hard-link stub names.
+//
+// HFS+ does not store the target's CNID in the stub. It stores an "indirect
+// node number", and the inode itself lives in the volume's private metadata
+// directory under the name "iNode<number>" — resolution is by name, not by
+// CNID. Apple's hfs_makelink normally assigns that number from the file's own
+// c_fileid, and renaming the file into the private directory preserves its
+// CNID, so the two are usually equal:
+//
+//	indnodeno = cp->c_fileid;
+//	MAKE_INODE_NAME(inodename, sizeof(inodename), indnodeno);
+//
+// Usually, but not always. When that name already exists the loop retries with
+// a separate counter (`indnodeno = cur_link_id++`), and from then on the number
+// in the stub is not the inode's CNID at all. Treating it as one then resolves
+// to whatever unrelated record happens to hold that CNID, or to nothing.
+//
+// So the name lookup is authoritative and the CNID is the fallback, which also
+// keeps volumes whose private directory is missing or damaged working exactly
+// as they did before.
+func (v *Volume) lookupHardLinkInode(iNodeNum uint32) (CatalogRecord, error) {
+	if rec, ok := v.findInodeByName(iNodeNum); ok {
+		return rec, nil
+	}
+	return v.lookupCNIDRaw(iNodeNum)
+}
+
+// findInodeByName looks for "iNode<n>" inside the private metadata directory.
+func (v *Volume) findInodeByName(iNodeNum uint32) (CatalogRecord, bool) {
+	parent, ok := v.privateDataDirCNID()
+	if !ok {
+		return CatalogRecord{}, false
+	}
+
+	want := "iNode" + strconv.FormatUint(uint64(iNodeNum), 10)
+	var found CatalogRecord
+	var ok2 bool
+	err := v.walkCatalogChildren(parent, func(key CatalogKey, payload []byte) error {
+		if key.NameString() != want {
+			return nil
+		}
+		r, err := v.decodeCatalogRecord(key, payload)
+		if err != nil || r.Type != CatalogRecordFile {
+			return nil
+		}
+		found, ok2 = r, true
+		return ErrStopWalk
+	})
+	if err != nil && !errors.Is(err, ErrStopWalk) {
+		return CatalogRecord{}, false
+	}
+	return found, ok2
+}
+
+// privateDataDirCNID finds the hard-link store in the volume root.
+//
+// Its real name begins with four NUL bytes so that it cannot be typed, and
+// isSystemFile keys off the same substring this does.
+func (v *Volume) privateDataDirCNID() (uint32, bool) {
+	// Cached because a volume with many hard links — a Time Machine backup is
+	// the normal case — would otherwise rescan the root for every one of them.
+	// The lock is dropped before walking, so at worst two callers race and both
+	// do the search; holding it across walkCatalogChildren would deadlock
+	// against the node cache.
+	v.mu.RLock()
+	looked, cnid, found := v.privDirLooked, v.privDirCNID, v.privDirFound
+	v.mu.RUnlock()
+	if looked {
+		return cnid, found
+	}
+
+	cnid, found = v.findPrivateDataDir()
+
+	v.mu.Lock()
+	v.privDirCNID, v.privDirFound, v.privDirLooked = cnid, found, true
+	v.mu.Unlock()
+	return cnid, found
+}
+
+func (v *Volume) findPrivateDataDir() (uint32, bool) {
+	var cnid uint32
+	var ok bool
+	err := v.walkCatalogChildren(rootFolderCNID, func(key CatalogKey, payload []byte) error {
+		name := key.NameString()
+		if !strings.Contains(name, privateDataDirNameSub) || strings.Contains(name, "Directory Data") {
+			return nil
+		}
+		r, err := v.decodeCatalogRecord(key, payload)
+		if err != nil || r.Type != CatalogRecordFolder {
+			return nil
+		}
+		cnid, ok = r.CNID, true
+		return ErrStopWalk
+	})
+	if err != nil && !errors.Is(err, ErrStopWalk) {
+		return 0, false
+	}
+	return cnid, ok
 }
 
 func (v *Volume) hydrateCatalogRecord(rec CatalogRecord) (CatalogRecord, error) {

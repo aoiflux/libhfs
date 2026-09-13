@@ -344,13 +344,22 @@ func buildDecmpfsResourceFork(t testing.TB, payload []byte) []byte {
 // filler and fails rather than quietly succeeding.
 func buildDecmpfsResourceForkAt(t testing.TB, payload []byte, dataOffset int) []byte {
 	t.Helper()
+	return buildDecmpfsResourceForkEnc(t, payload, dataOffset, zlibCompress)
+}
+
+// buildDecmpfsResourceForkEnc is buildDecmpfsResourceForkAt with the per-chunk
+// encoder supplied by the caller, so a fixture can build the raw-storage fork
+// types as well as the zlib ones. The chunk table is identical either way —
+// only the stored bytes differ — which is what makes the two comparable.
+func buildDecmpfsResourceForkEnc(t testing.TB, payload []byte, dataOffset int, encode func(testing.TB, []byte) []byte) []byte {
+	t.Helper()
 
 	numChunks := (len(payload) + decmpfsChunkSize - 1) / decmpfsChunkSize
 	chunks := make([][]byte, numChunks)
 	for i := range chunks {
 		start := i * decmpfsChunkSize
 		end := min(start+decmpfsChunkSize, len(payload))
-		chunks[i] = zlibCompress(t, payload[start:end])
+		chunks[i] = encode(t, payload[start:end])
 	}
 
 	tableBase := dataOffset + 4 // chunk count sits here

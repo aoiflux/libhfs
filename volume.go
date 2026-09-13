@@ -300,8 +300,85 @@ func hfsCatalogTime(raw uint32) time.Time {
 	return time.Unix(int64(raw)-int64(hfsEpochDeltaSeconds), 0).UTC()
 }
 
+// IsCorrupt reports whether an error means the volume's own metadata is
+// damaged, as opposed to the caller having asked for something that is not
+// there.
+//
+// It is the test for "this image is broken" rather than "this path does not
+// exist": ErrNotFound, ErrNotFile, ErrNotDir and ErrInvalidOffset are all
+// answers about the request and are deliberately excluded, as are
+// ErrUnsupportedFormat and ErrUnsupportedHFS, which say the volume is
+// well-formed but of a kind this package will not read.
+//
+// ErrShortRead is also excluded, and that exclusion is the one worth
+// explaining. A short read means the image ends before the volume says it
+// should, which is a truncated or partial acquisition rather than corrupt
+// metadata. For a forensic report those are different findings — one impeaches
+// the evidence, the other impeaches the copy — so a caller that wants to treat
+// them alike should test for it explicitly with errors.Is.
 func IsCorrupt(err error) bool {
-	return errors.Is(err, ErrCorrupt) || errors.Is(err, ErrInvalidSignature) || errors.Is(err, ErrUnsupportedVer)
+	return errors.Is(err, ErrCorrupt) ||
+		errors.Is(err, ErrInvalidSignature) ||
+		errors.Is(err, ErrUnsupportedVer) ||
+		errors.Is(err, ErrInvalidBTreeNode) ||
+		errors.Is(err, ErrInvalidBTreeKey) ||
+		errors.Is(err, ErrMissingExtent)
+}
+
+// VolumeName returns the name the volume records for itself.
+//
+// The two formats keep it in different places, and this reads whichever one is
+// authoritative for the volume at hand. Classic HFS stores it in the MDB as
+// drVN, which is read directly here: that survives catalog damage, which is
+// exactly when an examiner still wants to know what the volume called itself.
+// HFS+ and HFSX have no such field — the name exists only as the root folder's
+// catalog key — so there it comes from the root record.
+//
+// On classic HFS the root record carries the name as well, so a caller wanting
+// to check the two against each other can compare this against
+// [Volume.GetRootDirectory]'s Name. They disagreeing is a finding in itself.
+//
+// ErrNotFound is returned when the volume records no name at all.
+func (v *Volume) VolumeName() (string, error) {
+	if v == nil {
+		return "", &ParseError{Op: "volume_name", Offset: 0, Err: ErrCorrupt}
+	}
+	if v.kind == KindHFS {
+		return v.hfsVolumeName()
+	}
+
+	root, err := v.GetRootDirectory()
+	if err != nil {
+		return "", err
+	}
+	if root.Name == "" {
+		return "", &ParseError{Op: "volume_name", Offset: 0, Err: ErrNotFound}
+	}
+	return root.Name, nil
+}
+
+// hfsVolumeName reads drVN out of the classic HFS master directory block.
+func (v *Volume) hfsVolumeName() (string, error) {
+	if v.reader == nil {
+		return "", &ParseError{Op: "volume_name", Offset: volumeHeaderOffset, Err: ErrCorrupt}
+	}
+
+	mdb := make([]byte, volumeHeaderSize)
+	if err := readAtExact(v.reader, volumeHeaderOffset, mdb); err != nil {
+		return "", err
+	}
+
+	// A Str27 whose length byte exceeds the field is damage, not a longer name:
+	// clamp rather than read into drVolBkUp beyond it.
+	n := min(int(mdb[hfsMDBOffVolumeName]), hfsMDBVolumeNameMax)
+	if n == 0 {
+		return "", &ParseError{
+			Op:     "volume_name",
+			Offset: volumeHeaderOffset + hfsMDBOffVolumeName,
+			Err:    ErrNotFound,
+		}
+	}
+	return v.decodeHFSName(mdb[hfsMDBOffVolumeName+1 : hfsMDBOffVolumeName+1+n]), nil
 }
 
 func (v *Volume) CatalogBTreeHeader() (BTreeHeaderRecord, error) {
