@@ -87,7 +87,8 @@ Implemented:
   for codecs outside the standard library
 - Deleted-record recovery from B-tree node slack, free nodes and unallocated
   blocks, with confidence grading and stale-copy filtering
-- POSIX ownership and mode, Finder metadata, hard links and symbolic links
+- POSIX ownership and mode, Finder metadata, symbolic links, and hard links to
+  files and to directories, resolved through both private stores
 - Allocation bitmap access
 - Byte-range addressing: extents resolved to image offsets, with file slack
   reported separately, correct on wrapper and classic HFS volumes
@@ -108,9 +109,10 @@ Current limitations:
 - LZVN, LZFSE and LZBITMAP decmpfs codecs are not built in — register your own
 - Resource-fork decompression is implemented from published descriptions and
   has not been validated against a macOS-produced compressed file
-- The displayed volume UUID is derived from the published algorithm and has not
-  been checked against a UUID produced by macOS itself; the stored identifier
-  from `VolumeIdentifier()` carries no such doubt
+- The displayed volume UUID is derived from the published algorithm rather than
+  stored on the volume; it agrees with util-linux's independent implementation
+  of that derivation on every corpus image, but has not been compared against
+  what macOS itself displays
 - ACLs in `com.apple.system.Security` are returned as opaque bytes
 - Classic HFS script encodings other than Mac OS Roman are not decoded
 - Classic HFS carries no extended attributes, access dates, attribute
@@ -155,6 +157,39 @@ Note that the volume-level dates on `VolumeHeader` follow different rules: per
 the HFS+ specification `CreateTime` is stored in local time while the other
 volume dates are GMT, and unset fields read back as the Unix epoch rather than
 a zero time.
+
+## Links
+
+`OpenCNID` resolves a hard link and reports the target inode's metadata — its
+size, times and mode — while keeping the link's own name and parent, which is
+what `stat` shows and what a listing should say:
+
+```go
+rec, err := vol.OpenCNID(cnid)
+// rec.Name and rec.ParentCNID are the link's; everything else is the target's.
+// rec.Link says which kind it was: LinkHardFile, LinkHardDir or LinkSymbolic.
+
+raw, err := vol.OpenCNIDRaw(cnid) // the stub itself, unresolved
+```
+
+- **Directories can be hard links.** Time Machine builds its backups out of
+  them. They resolve like file links, so `WalkDirCNID` on one lists the
+  target's children. Walking the CNID as it was given would report an empty
+  directory — a wrong answer rather than an error.
+- **A directory hard link is stored as a file record.** Both kinds are stubs
+  pointing into a private folder at the volume root, a different folder for each
+  kind, so `Link == LinkHardDir` on a record whose `Type` is a file is correct
+  rather than a contradiction. A folder record is never a link stub.
+- **A Finder alias is not a hard link.** An ordinary alias to a folder carries
+  the same Finder type and creator as a directory hard link; only the link-chain
+  flag separates the two. libhfs tests that flag, as the kernel does, and leaves
+  aliases unresolved — an alias points at its target through its own contents,
+  not through the catalog.
+- **`OpenCNIDRaw` is the escape hatch.** When the link itself is the artifact —
+  what the directory entry actually holds, or which names share one inode — take
+  the raw record: on it `LinkTarget` is the stub's reference number, while on a
+  resolved record it is the CNID actually opened.
+- **Classic HFS has no hard links at all**, which `Capabilities()` reports.
 
 ## API Highlights
 

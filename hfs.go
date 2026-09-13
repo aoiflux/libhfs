@@ -79,6 +79,16 @@
 // the target's metadata, matching what stat would show, while keeping the link's
 // name and parent. [CatalogRecord.Link] makes that visible; [Volume.OpenCNIDRaw]
 // returns the link record untouched, which is often what an examiner wants.
+// Directories can be hard links too — Time Machine builds its backups out of
+// them — and they resolve the same way, so [Volume.WalkDirCNID] on a directory
+// link lists the target's children instead of reporting an empty directory.
+// Both kinds are stored as file records pointing into a private folder at the
+// volume root, a different folder for each kind, which is why [LinkHardDir] can
+// appear on a record whose type is a file. An ordinary Finder alias to a folder
+// carries the same Finder type and creator as a directory hard link and is not
+// one: the two are separated by the link-chain flag, as the kernel separates
+// them, and an alias is left unresolved because its target is a document's
+// contents rather than a catalog reference.
 //
 // Damaged volumes. Lookups descend the B-tree by key. When the tree does not
 // permit that — an unreadable node, an unparseable key, or index keys that
