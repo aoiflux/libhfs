@@ -75,6 +75,13 @@ func (v *Volume) hasAttributes() bool {
 // are returned like any other. Filtering them is a policy decision that belongs
 // to the caller, not the parser.
 func (v *Volume) ListXAttrs(cnid uint32) ([]XAttr, error) {
+	// hasAttributes answers false for a nil volume, which would report the
+	// node as having no attributes. That is a different claim from "there is
+	// no volume here", and an examiner reading a report cannot tell them
+	// apart after the fact.
+	if v == nil {
+		return nil, &ParseError{Op: "list_xattrs", Offset: int64(cnid), Err: ErrCorrupt}
+	}
 	if !v.hasAttributes() {
 		return nil, nil
 	}
@@ -274,6 +281,9 @@ func (v *Volume) OpenXAttr(cnid uint32, name string) (*File, error) {
 // This is the bulk-collection path: quarantine flags, provenance records and
 // security ACLs across a whole image, without a lookup per file.
 func (v *Volume) WalkXAttrs(cb func(XAttr) error) error {
+	if v == nil {
+		return &ParseError{Op: "walk_xattrs", Offset: 0, Err: ErrCorrupt}
+	}
 	if cb == nil || !v.hasAttributes() {
 		return nil
 	}

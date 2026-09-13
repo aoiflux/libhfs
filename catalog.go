@@ -283,6 +283,9 @@ func (v *Volume) OpenCNID(cnid uint32) (CatalogRecord, error) {
 }
 
 func (v *Volume) lookupCNIDRaw(cnid uint32) (CatalogRecord, error) {
+	if v == nil {
+		return CatalogRecord{}, &ParseError{Op: "open_cnid", Offset: int64(cnid), Err: ErrCorrupt}
+	}
 	if rec, ok := v.cacheLookup(cnid); ok {
 		return rec, nil
 	}
@@ -556,6 +559,11 @@ func (v *Volume) findChild(parent uint32, name string, cmp func(a, b string) boo
 }
 
 func (v *Volume) catalogNameComparer() (func(a, b string) bool, error) {
+	// Every by-path accessor asks for a comparer before it resolves anything,
+	// so this is where the whole path family meets a nil receiver.
+	if v == nil {
+		return nil, &ParseError{Op: "open_path", Offset: 0, Err: ErrCorrupt}
+	}
 	if v.kind == KindHFS {
 		return func(a, b string) bool {
 			return strings.EqualFold(a, b)

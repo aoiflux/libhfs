@@ -15,11 +15,38 @@ type File struct {
 	resource bool
 }
 
-func (f *File) CNID() uint32 { return f.rec.CNID }
-func (f *File) Name() string { return f.rec.Name }
-func (f *File) Size() int64  { return f.size }
+// CNID, Name and Size describe the open fork, and answer for a nil *File with
+// the zero value rather than panicking.
+//
+// The Open*By* methods return a nil *File alongside their error, so these are
+// what a caller who did not check that error reaches first. A zero CNID cannot
+// be confused with a real one: catalog node IDs start at 1 and the first file
+// on any volume is 16.
+func (f *File) CNID() uint32 {
+	if f == nil {
+		return 0
+	}
+	return f.rec.CNID
+}
+
+func (f *File) Name() string {
+	if f == nil {
+		return ""
+	}
+	return f.rec.Name
+}
+
+func (f *File) Size() int64 {
+	if f == nil {
+		return 0
+	}
+	return f.size
+}
 
 func (f *File) Read(p []byte) (int, error) {
+	if f == nil {
+		return 0, &ParseError{Op: "file_read", Offset: 0, Err: ErrCorrupt}
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -29,6 +56,9 @@ func (f *File) Read(p []byte) (int, error) {
 }
 
 func (f *File) ReadAt(p []byte, off int64) (int, error) {
+	if f == nil {
+		return 0, &ParseError{Op: "file_read_at", Offset: off, Err: ErrCorrupt}
+	}
 	if off < 0 {
 		return 0, &ParseError{Op: "file_read_at", Offset: off, Err: ErrInvalidOffset}
 	}
@@ -113,6 +143,9 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 // being allowed to exhaust memory. Use [File.ReadAt] with a caller-supplied
 // buffer to stream a fork that is legitimately larger than the cap.
 func (f *File) ReadAll() ([]byte, error) {
+	if f == nil {
+		return nil, &ParseError{Op: "file_read_all", Offset: 0, Err: ErrCorrupt}
+	}
 	if f.size == 0 {
 		return []byte{}, nil
 	}

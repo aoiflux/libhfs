@@ -305,10 +305,18 @@ func IsCorrupt(err error) bool {
 }
 
 func (v *Volume) CatalogBTreeHeader() (BTreeHeaderRecord, error) {
+	// readForkBTreeHeader guards its own receiver, but reaching it means
+	// evaluating v.header first, which is the dereference that panics.
+	if v == nil {
+		return BTreeHeaderRecord{}, &ParseError{Op: "catalog_btree_header", Offset: 0, Err: ErrCorrupt}
+	}
 	return v.readForkBTreeHeader(v.header.CatalogFile, "catalog")
 }
 
 func (v *Volume) ExtentsBTreeHeader() (BTreeHeaderRecord, error) {
+	if v == nil {
+		return BTreeHeaderRecord{}, &ParseError{Op: "extents_btree_header", Offset: 0, Err: ErrCorrupt}
+	}
 	return v.readForkBTreeHeader(v.header.ExtentsFile, "extents")
 }
 

@@ -293,7 +293,30 @@ type ioReaderAt interface {
 	ReadAt(p []byte, off int64) (n int, err error)
 }
 
-func (v *Volume) Kind() FileSystemKind { return v.kind }
-func (v *Volume) Header() VolumeHeader { return v.header }
+// Kind reports which of the three formats this volume is.
+//
+// A nil Volume reports the empty kind rather than panicking. That matters
+// because the value a failed Open returns is a nil *Volume, and an examiner
+// tool that logs the kind before checking the error should produce a useless
+// line in a report rather than take the process down mid-acquisition. The same
+// reasoning runs through every method here: see Volume.Close.
+func (v *Volume) Kind() FileSystemKind {
+	if v == nil {
+		return ""
+	}
+	return v.kind
+}
+
+// Header returns the parsed volume header, or the zero header for a nil Volume.
+//
+// The zero header is distinguishable from any real one: Open rejects a volume
+// whose BlockSize or TotalBlocks is zero, so a header with either field zero
+// never comes from a volume that opened successfully.
+func (v *Volume) Header() VolumeHeader {
+	if v == nil {
+		return VolumeHeader{}
+	}
+	return v.header
+}
 
 func (v *Volume) Close() error { return nil }

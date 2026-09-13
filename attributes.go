@@ -22,6 +22,9 @@ type attributesKey struct {
 }
 
 func (v *Volume) AttributesBTreeHeader() (BTreeHeaderRecord, error) {
+	if v == nil {
+		return BTreeHeaderRecord{}, &ParseError{Op: "attributes_btree_header", Offset: 0, Err: ErrCorrupt}
+	}
 	return v.readForkBTreeHeader(v.header.AttributesFile, "attributes")
 }
 
