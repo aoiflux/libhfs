@@ -31,7 +31,7 @@
 # into $HOME as an ordinary user. Under WSL, invoke from PowerShell rather than
 # Git Bash, which rewrites /mnt/... arguments into Windows paths:
 #
-#   wsl.exe -- sh /mnt/o/research/libhfs/testdata/gen_classic_corpus.sh /mnt/e/dataset/hfs_classic
+#   wsl.exe -- sh /mnt/o/research/libhfs/testdata/gen_classic_corpus.sh /mnt/e/dataset/hfs_synth
 #
 # Volumes total about 80 MB. Creation dates are fresh on every run, so a
 # regenerated image is not byte-identical to its predecessor.
