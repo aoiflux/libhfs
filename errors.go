@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 import (
 	"errors"
@@ -6,19 +6,19 @@ import (
 )
 
 var (
-	ErrInvalidSignature  = errors.New("hfs: invalid volume signature")
-	ErrUnsupportedFormat = errors.New("hfs: unsupported filesystem format")
-	ErrUnsupportedHFS    = errors.New("hfs: classic HFS volume is not supported")
-	ErrUnsupportedVer    = errors.New("hfs: unsupported volume version")
-	ErrCorrupt           = errors.New("hfs: corrupt volume metadata")
-	ErrShortRead         = errors.New("hfs: short read")
-	ErrInvalidBTreeNode  = errors.New("hfs: invalid btree node")
-	ErrInvalidBTreeKey   = errors.New("hfs: invalid btree key")
-	ErrMissingExtent     = errors.New("hfs: missing extent data")
-	ErrNotFound          = errors.New("hfs: not found")
-	ErrNotFile           = errors.New("hfs: record is not a file")
-	ErrNotDir            = errors.New("hfs: record is not a directory")
-	ErrInvalidOffset     = errors.New("hfs: invalid read offset")
+	ErrInvalidSignature  = errors.New("libhfs: invalid volume signature")
+	ErrUnsupportedFormat = errors.New("libhfs: unsupported filesystem format")
+	ErrUnsupportedHFS    = errors.New("libhfs: classic HFS volume is not supported")
+	ErrUnsupportedVer    = errors.New("libhfs: unsupported volume version")
+	ErrCorrupt           = errors.New("libhfs: corrupt volume metadata")
+	ErrShortRead         = errors.New("libhfs: short read")
+	ErrInvalidBTreeNode  = errors.New("libhfs: invalid btree node")
+	ErrInvalidBTreeKey   = errors.New("libhfs: invalid btree key")
+	ErrMissingExtent     = errors.New("libhfs: missing extent data")
+	ErrNotFound          = errors.New("libhfs: not found")
+	ErrNotFile           = errors.New("libhfs: record is not a file")
+	ErrNotDir            = errors.New("libhfs: record is not a directory")
+	ErrInvalidOffset     = errors.New("libhfs: invalid read offset")
 )
 
 // ErrStopWalk ends a walk early.
@@ -32,7 +32,7 @@ var (
 //	err := vol.WalkCatalog(func(r CatalogRecord) error {
 //		if r.Name == "secrets.txt" {
 //			found = r
-//			return hfs.ErrStopWalk
+//			return libhfs.ErrStopWalk
 //		}
 //		return nil
 //	})
@@ -42,7 +42,7 @@ var (
 //
 // The library never returns this as a failure of its own, so a caller that
 // never uses it will never see it.
-var ErrStopWalk = errors.New("hfs: stop walk")
+var ErrStopWalk = errors.New("libhfs: stop walk")
 
 // endWalk maps a traversal's outcome onto what a Walk method returns: a
 // deliberate stop becomes success, and everything else passes through.
@@ -69,7 +69,7 @@ func (e *ParseError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("hfs: %s at offset %d: %v", e.Op, e.Offset, e.Err)
+	return fmt.Sprintf("libhfs: %s at offset %d: %v", e.Op, e.Offset, e.Err)
 }
 
 func (e *ParseError) Unwrap() error {

@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 import (
 	"bytes"
@@ -41,7 +41,7 @@ var decmpfsMagic = [4]byte{'f', 'p', 'm', 'c'}
 // The file's data is not lost: [Volume.OpenResourceForkByCNID] still returns
 // the raw resource fork, so an artifact can be preserved even when it cannot be
 // decompressed. [CatalogRecord.CompressionType] says which codec was needed.
-var ErrUnsupportedCompression = errors.New("hfs: unsupported decmpfs compression type")
+var ErrUnsupportedCompression = errors.New("libhfs: unsupported decmpfs compression type")
 
 // Decompressor decodes one decmpfs chunk.
 //
@@ -103,8 +103,8 @@ var globalCodecs codecRegistry
 // this keeps the package dependency-free while letting a consumer that needs
 // those codecs opt in:
 //
-//	hfs.RegisterDecompressor(hfs.CompressionLZFSEFork,
-//		hfs.DecompressorFunc(func(dst, src []byte) (int, error) { ... }))
+//	libhfs.RegisterDecompressor(libhfs.CompressionLZFSEFork,
+//		libhfs.DecompressorFunc(func(dst, src []byte) (int, error) { ... }))
 //
 // Safe for concurrent use, but intended to be called during initialisation.
 func RegisterDecompressor(compressionType uint32, d Decompressor) {

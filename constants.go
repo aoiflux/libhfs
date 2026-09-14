@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 const (
 	volumeHeaderOffset = 1024

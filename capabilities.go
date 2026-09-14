@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // Volume attribute bits from the HFS+ volume header.
 const (

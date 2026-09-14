@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // volume.go holds volume-header parsing and the geometry derived from it.
 // The library's entry point, Open, lives in hfs.go.

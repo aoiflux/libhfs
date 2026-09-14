@@ -28,7 +28,7 @@ import (
 	"log"
 	"os"
 
-	hfs "github.com/aoiflux/libhfs"
+	"github.com/aoiflux/libhfs"
 )
 
 func main() {
@@ -38,7 +38,7 @@ func main() {
 	}
 	defer img.Close()
 
-	vol, err := hfs.Open(img)
+	vol, err := libhfs.Open(img)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -343,11 +343,11 @@ Every `Walk*` method takes a callback, and returning `ErrStopWalk` from one ends
 the walk successfully:
 
 ```go
-var found hfs.CatalogRecord
-err := vol.WalkCatalog(func(r hfs.CatalogRecord) error {
+var found libhfs.CatalogRecord
+err := vol.WalkCatalog(func(r libhfs.CatalogRecord) error {
     if r.Name == "secrets.txt" {
         found = r
-        return hfs.ErrStopWalk
+        return libhfs.ErrStopWalk
     }
     return nil
 })
@@ -401,7 +401,7 @@ reformatting of it — and only the second will match `diskutil` or a system log
 the caller does.
 
 ```go
-rep, err := vol.Report(&hfs.ReportOptions{IncludeFiles: true, MaxFiles: 5000})
+rep, err := vol.Report(&libhfs.ReportOptions{IncludeFiles: true, MaxFiles: 5000})
 if err != nil {
     log.Fatal(err)
 }
@@ -540,18 +540,18 @@ import (
 	"errors"
 	"fmt"
 
-	hfs "github.com/aoiflux/libhfs"
+	"github.com/aoiflux/libhfs"
 )
 
-func handlePath(vol *hfs.Volume) {
+func handlePath(vol *libhfs.Volume) {
 	rec, err := vol.OpenPath("/missing/file")
 	if err != nil {
-		if errors.Is(err, hfs.ErrNotFound) {
+		if errors.Is(err, libhfs.ErrNotFound) {
 			fmt.Println("not found")
 			return
 		}
 
-		var pErr *hfs.ParseError
+		var pErr *libhfs.ParseError
 		if errors.As(err, &pErr) {
 			fmt.Printf("op=%s offset=%d\n", pErr.Op, pErr.Offset)
 		}

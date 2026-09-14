@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // On-disk structure offsets, grouped by the structure they describe.
 //

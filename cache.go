@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // B-tree identifiers, so nodes from different trees cannot collide in the
 // node cache.

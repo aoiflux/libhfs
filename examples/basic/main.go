@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	hfs "github.com/aoiflux/libhfs"
+	"github.com/aoiflux/libhfs"
 )
 
 func main() {
@@ -28,7 +28,7 @@ func main() {
 	}
 	defer f.Close()
 
-	vol, err := hfs.Open(f)
+	vol, err := libhfs.Open(f)
 	if err != nil {
 		log.Fatalf("failed to parse HFS volume: %v", err)
 	}
@@ -39,7 +39,7 @@ func main() {
 	listRootDir(vol)
 }
 
-func printVolumeInfo(vol *hfs.Volume) {
+func printVolumeInfo(vol *libhfs.Volume) {
 	h := vol.Header()
 
 	fmt.Println("=== HFS Volume Information ===")
@@ -68,7 +68,7 @@ func printVolumeInfo(vol *hfs.Volume) {
 	}
 }
 
-func listRootDir(vol *hfs.Volume) {
+func listRootDir(vol *libhfs.Volume) {
 	entries, err := vol.ReadDir("/")
 	if err != nil {
 		log.Fatalf("failed to list root directory: %v", err)

@@ -1,4 +1,4 @@
-// Package hfs reads Apple HFS, HFS+ and HFSX volumes from disk images.
+// Package libhfs reads Apple HFS, HFS+ and HFSX volumes from disk images.
 //
 // The library is strictly read-only and never writes to the volume it is given.
 // It is built for tooling and forensic analysis, so it favours reporting what is
@@ -16,7 +16,7 @@
 //	}
 //	defer img.Close()
 //
-//	vol, err := hfs.Open(img)
+//	vol, err := libhfs.Open(img)
 //	if err != nil {
 //		return err
 //	}
@@ -180,15 +180,15 @@
 // byte offset, so both errors.Is and errors.As work as expected:
 //
 //	rec, err := vol.OpenPath("/missing")
-//	if errors.Is(err, hfs.ErrNotFound) {
+//	if errors.Is(err, libhfs.ErrNotFound) {
 //		// ...
 //	}
 //
-//	var pErr *hfs.ParseError
+//	var pErr *libhfs.ParseError
 //	if errors.As(err, &pErr) {
 //		log.Printf("op=%s offset=%d", pErr.Op, pErr.Offset)
 //	}
-package hfs
+package libhfs
 
 import "io"
 

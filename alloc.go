@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // The allocation file is a bitmap with one bit per allocation block, most
 // significant bit first: block N is bit (7 - N%8) of byte N/8. A set bit means

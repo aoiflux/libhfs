@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	hfs "github.com/aoiflux/libhfs"
+	"github.com/aoiflux/libhfs"
 )
 
 func main() {
@@ -34,7 +34,7 @@ func main() {
 	}
 	defer f.Close()
 
-	vol, err := hfs.Open(f)
+	vol, err := libhfs.Open(f)
 	if err != nil {
 		log.Fatalf("failed to parse HFS volume: %v", err)
 	}
@@ -47,10 +47,10 @@ func main() {
 
 	hfsFile, err := vol.OpenFileByPath(srcPath)
 	if err != nil {
-		if errors.Is(err, hfs.ErrNotFound) {
+		if errors.Is(err, libhfs.ErrNotFound) {
 			log.Fatalf("file not found: %s", srcPath)
 		}
-		if errors.Is(err, hfs.ErrNotFile) {
+		if errors.Is(err, libhfs.ErrNotFile) {
 			log.Fatalf("%s is a directory, not a file", srcPath)
 		}
 		log.Fatalf("failed to open file: %v", err)
@@ -70,9 +70,9 @@ func main() {
 	fmt.Printf("Extracted %s (%d bytes)\n", outPath, written)
 }
 
-// hfsFileReader wraps hfs.File to satisfy io.Reader via sequential reads.
+// hfsFileReader wraps libhfs.File to satisfy io.Reader via sequential reads.
 type hfsFileReader struct {
-	f   *hfs.File
+	f   *libhfs.File
 	off int64
 }
 

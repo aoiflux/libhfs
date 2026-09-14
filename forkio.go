@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // Reserved catalog node IDs for the special files described by the volume
 // header. Their forks are addressed like any other file's, so extent resolution

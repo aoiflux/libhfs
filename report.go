@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 import (
 	"context"
@@ -181,7 +181,7 @@ func DefaultReportOptions() ReportOptions {
 }
 
 // errReportFull stops the catalog walk once the file bound is reached.
-var errReportFull = errors.New("hfs: report file limit reached")
+var errReportFull = errors.New("libhfs: report file limit reached")
 
 // Report builds a summary of the volume.
 //

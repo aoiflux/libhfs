@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 func parseExtentsRecord(payload []byte) ([]ExtentDescriptor, error) {
 	const extRecSize = 8 * 8

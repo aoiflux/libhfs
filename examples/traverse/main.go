@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	hfs "github.com/aoiflux/libhfs"
+	"github.com/aoiflux/libhfs"
 )
 
 type stats struct {
@@ -35,7 +35,7 @@ func main() {
 	}
 	defer f.Close()
 
-	vol, err := hfs.Open(f)
+	vol, err := libhfs.Open(f)
 	if err != nil {
 		log.Fatalf("failed to parse HFS volume: %v", err)
 	}
@@ -65,7 +65,7 @@ func main() {
 
 const maxDepth = 32
 
-func traverse(vol *hfs.Volume, path string, depth int, s *stats) error {
+func traverse(vol *libhfs.Volume, path string, depth int, s *stats) error {
 	if depth > maxDepth {
 		return nil
 	}

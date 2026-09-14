@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 import (
 	"errors"
@@ -12,7 +12,7 @@ import (
 //
 // Partial corruption is the normal case on forensic images. A search that
 // gives up is worse than a slow search that succeeds.
-var errSearchDegraded = errors.New("hfs: btree search degraded")
+var errSearchDegraded = errors.New("libhfs: btree search degraded")
 
 // callbackError distinguishes an error raised by a caller's callback from one
 // raised by the search machinery. Callback errors must propagate; search

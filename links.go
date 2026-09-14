@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 import "strings"
 

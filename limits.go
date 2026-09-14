@@ -1,10 +1,10 @@
-package hfs
+package libhfs
 
 import "errors"
 
 // ErrSizeLimit reports that an on-disk size field exceeded the volume's
 // allocation limit. See [Volume.SetMaxAlloc].
-var ErrSizeLimit = errors.New("hfs: declared size exceeds allocation limit")
+var ErrSizeLimit = errors.New("libhfs: declared size exceeds allocation limit")
 
 // SetMaxAlloc caps any single buffer this package will allocate from a size
 // recorded on the volume. Reads that would exceed the cap return

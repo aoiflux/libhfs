@@ -1,4 +1,4 @@
-package hfs
+package libhfs
 
 // TextEncoding selects how classic HFS filename bytes are decoded.
 //
