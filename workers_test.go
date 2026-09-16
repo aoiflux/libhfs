@@ -261,20 +261,34 @@ func TestConfigRoundTrip(t *testing.T) {
 		t.Errorf("zero Config = %+v, Open gave %+v", configured.Config(), plain.Config())
 	}
 
-	// Explicit values must survive.
+	// Explicit values must survive. BaseOffset is set here rather than left at
+	// zero because every other field in this test is non-zero, and a Config()
+	// that silently dropped it would still satisfy the comparison below if the
+	// value it forgot happened to be the zero one.
 	want := Config{
 		CacheSize:     7,
 		NodeCacheSize: 9,
 		MaxAlloc:      1234,
 		TextEncoding:  TextEncodingRaw,
 		CarveWorkers:  3,
+		BaseOffset:    embedOffset,
 	}
-	vol, err := OpenWithConfig(bytes.NewReader(img), want)
+	vol, err := OpenWithConfig(bytes.NewReader(embedImage(t, img, embedFill)), want)
 	if err != nil {
 		t.Fatalf("OpenWithConfig: %v", err)
 	}
 	if got := vol.Config(); got != want {
 		t.Errorf("Config() = %+v, want %+v", got, want)
+	}
+
+	// And the snapshot must be usable as input: reopening with it reproduces
+	// the volume, which is the property "snapshot" claims.
+	again, err := OpenWithConfig(bytes.NewReader(embedImage(t, img, embedFill)), vol.Config())
+	if err != nil {
+		t.Fatalf("reopening with the reported Config failed: %v", err)
+	}
+	if again.BaseOffset() != vol.BaseOffset() {
+		t.Errorf("reopened BaseOffset() = %d, want %d", again.BaseOffset(), vol.BaseOffset())
 	}
 
 	// DisableCache overrides the sizes without the caller needing the defaults.

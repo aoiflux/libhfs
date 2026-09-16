@@ -293,9 +293,10 @@ Four things to understand before treating the output as evidence:
 
 - **Block numbers are not byte offsets.** `BaseOffset()` is the image byte
   offset that allocation block 0 maps to. It is zero only for a plain HFS+ or
-  HFSX volume at the start of the reader; it is non-zero for classic HFS and
-  for any HFS+ volume embedded in an HFS wrapper. Getting it wrong is silent —
-  the read succeeds and returns some other part of the image.
+  HFSX volume at the start of the reader; it is non-zero for classic HFS, for
+  any HFS+ volume embedded in an HFS wrapper, and for any volume opened with a
+  `Config.BaseOffset`. Getting it wrong is silent — the read succeeds and
+  returns some other part of the image.
 - **`Length` excludes slack.** It stops at the fork's logical size, so reading
   `Length` bytes at `DiskOffset` never picks up what the previous occupant of
   the block left behind. `Slack` counts the allocated bytes after it, beginning
@@ -313,6 +314,43 @@ Attribute extents work slightly differently from fork extents: they come from
 the attributes tree alone, carried in extension records beside the fork-data
 record rather than in the extents-overflow tree, and they are not trimmed
 against a block total because an attribute record does not record one.
+
+### Volumes inside a disk image
+
+When the reader is a whole disk image rather than one scoped to the volume, tell
+`libhfs` where the volume begins:
+
+```go
+vol, err := libhfs.OpenWithConfig(image, libhfs.Config{BaseOffset: partitionStart})
+```
+
+Every offset the library then reports — `ByteRange.DiskOffset`, a
+`DeletedRecord.ByteOffset` carved from unallocated space, `VolumeSummary.BaseOffset`
+— is absolute against `image`, so it can be intersected directly with offsets
+from anything else that addresses the same image.
+
+Wrapping the partition in an `io.SectionReader` also reads the volume correctly,
+and is the right choice when the volume really is the unit of interest. The
+difference is what the reported offsets mean: with a `SectionReader` they are
+partition-relative, and nothing at the point of use says so. Comparing those
+against whole-image offsets produces a confident wrong answer rather than an
+error.
+
+Two cautions:
+
+- **It composes with the derived offset, it does not replace it.** For an image
+  holding a partition at byte N containing an HFS wrapper whose embedded HFS+
+  volume starts W bytes into the wrapper, set `BaseOffset` to N — the wrapper's
+  start, which is all you can see from outside — and `BaseOffset()` reports N+W.
+- **`Config.BaseOffset` and `Volume.BaseOffset()` are not the same number.** The
+  first says where the volume begins; the second says where its allocation block
+  0 begins. On classic HFS they differ by the MDB and the bitmap, so a volume
+  opened with `BaseOffset: N` reports `Config().BaseOffset == N` and
+  `BaseOffset() == N + drAlBlSt*512`.
+
+A negative offset is rejected at open with `ErrInvalidOffset`; one past the end
+of the reader yields `ErrShortRead` naming the offset you supplied rather than
+claiming the image is truncated. Leaving it unset behaves exactly as `Open`.
 
 ## Catalog walks with paths
 
@@ -421,6 +459,12 @@ out, _ := json.MarshalIndent(rep, "", "  ")
 - **The report projects, it does not extend.** Every field is reachable through
   the ordinary API; the type exists so a tool can emit one document rather than
   assemble one.
+- **Keys are snake_case, and the document is versioned.** `schema_version` at
+  the root is the schema this document follows; `library_version` is the release
+  that wrote it; `generated` is when. Note that `volume.version` is a different
+  thing entirely — the volume's on-disk format version — which is why the
+  schema one is not simply called `version`. Both spellings changed in v0.4.0;
+  see [CHANGELOG.md](CHANGELOG.md) for the full key mapping.
 
 ## Concurrency
 

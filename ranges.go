@@ -28,7 +28,9 @@ type ByteRange struct {
 
 	// DiskOffset is where this range begins in the image, measured from the
 	// start of the io.ReaderAt passed to [Open]. It already accounts for
-	// [Volume.BaseOffset].
+	// [Volume.BaseOffset], and so for [Config.BaseOffset] too: a volume opened
+	// at a byte part-way through a disk image reports offsets into that image,
+	// not into the partition.
 	DiskOffset int64
 
 	// Length is how many of this range's bytes belong to the fork. Reading

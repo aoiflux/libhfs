@@ -90,7 +90,9 @@ type DeletedRecord struct {
 	// different things about where they were looking:
 	//
 	//   - RecoveredFromUnallocated: an absolute offset in the image, directly
-	//     seekable in the reader passed to [Open].
+	//     seekable in the reader passed to [Open]. It accounts for
+	//     [Volume.BaseOffset], including any [Config.BaseOffset] folded into
+	//     it.
 	//   - RecoveredFromNodeSlack: an offset within the node named by
 	//     NodeNumber, so the bytes are at that node's image offset plus this.
 	//   - RecoveredFromFreeNode: unset. NodeNumber is the provenance; the

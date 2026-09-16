@@ -68,8 +68,26 @@ type Volume struct {
 	reader ioReaderAt
 	kind   FileSystemKind
 	header VolumeHeader
-	// baseOffset is the byte offset where the parsed HFS+ volume starts on disk.
-	// It is zero for non-wrapper volumes.
+	// volumeStart is the byte offset in reader at which the volume itself
+	// begins — Config.BaseOffset, verbatim. It is what a caller supplies when
+	// the reader is a whole disk image rather than a reader scoped to the
+	// partition, and it is zero for a volume at the start of the reader.
+	//
+	// It is distinct from baseOffset and is NOT interchangeable with it. This
+	// one locates the volume header; that one locates allocation block 0, and
+	// on classic HFS the two differ by the MDB and the bitmap. Only the reads
+	// that address bytes from the start of the volume rather than from the
+	// allocation-block area use this field: the header probe in openAt, the
+	// MDB re-read in hfsVolumeName, and hfsBitmapOffset.
+	volumeStart int64
+
+	// baseOffset is the byte offset in reader that allocation block 0 maps to.
+	//
+	// It composes volumeStart with a value derived from the volume itself:
+	// zero for a plain HFS+ or HFSX volume, the embedded volume's offset for an
+	// HFS wrapper, and drAlBlSt*512 for classic HFS. Everything that addresses
+	// the volume by allocation block adds this, so a supplied volumeStart
+	// reaches those paths without them knowing it exists.
 	baseOffset int64
 
 	// hfsVBMStart is drVBMSt from a classic HFS MDB: the start of the volume

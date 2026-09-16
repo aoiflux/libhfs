@@ -36,18 +36,22 @@ func parseHFSWrapperEmbeddedOffset(mdb []byte) (int64, bool) {
 // the byte offset of the allocation-block area, and the volume bitmap's start
 // sector (drVBMSt), which classic HFS records directly rather than through a
 // fork.
-func parseHFSMasterDirectoryBlock(mdb []byte) (VolumeHeader, int64, uint16, error) {
+//
+// origin is the byte of the reader the volume begins at, so that a ParseError
+// names an offset the caller can actually seek to rather than a constant 1024.
+func parseHFSMasterDirectoryBlock(mdb []byte, origin int64) (VolumeHeader, int64, uint16, error) {
+	hdrAt := origin + volumeHeaderOffset
 	if len(mdb) < volumeHeaderSize {
-		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrShortRead}
+		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: hdrAt, Err: ErrShortRead}
 	}
 	if be16(mdb[volHdrSignature:volHdrSignature+2]) != signatureHFS {
-		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrInvalidSignature}
+		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: hdrAt, Err: ErrInvalidSignature}
 	}
 
 	blockSize := be32(mdb[hfsMDBOffBlockSize : hfsMDBOffBlockSize+4])
 	totalBlocks := uint32(be16(mdb[hfsMDBOffTotalBlocks : hfsMDBOffTotalBlocks+2]))
 	if blockSize == 0 || totalBlocks == 0 {
-		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: volumeHeaderOffset, Err: ErrCorrupt}
+		return VolumeHeader{}, 0, 0, &ParseError{Op: "parse_hfs_mdb", Offset: hdrAt, Err: ErrCorrupt}
 	}
 
 	allocBlockStart512 := be16(mdb[hfsMDBOffAlBlSt : hfsMDBOffAlBlSt+2])
@@ -116,13 +120,20 @@ func (v *Volume) diskOffset(rel int64) int64 {
 //	BaseOffset() + int64(block)*int64(Header().BlockSize)
 //
 // That formula holds on all three formats, which is the only reason a single
-// accessor is meaningful. It is zero for a plain HFS+ or HFSX volume at the
-// start of the reader. For an HFS wrapper carrying an embedded HFS+ volume it
-// is where the embedded volume begins, because the embedded volume numbers its
-// blocks from there. For classic HFS it is drAlBlSt*512, the start of the
-// allocation-block area rather than the start of the volume, because classic
-// HFS numbers allocation block 0 from there and not from sector 0 — a volume
-// offset would be wrong by the MDB and the bitmap on every read.
+// accessor is meaningful. Measured from the start of the volume, it is zero for
+// a plain HFS+ or HFSX volume; for an HFS wrapper carrying an embedded HFS+
+// volume it is where the embedded volume begins, because the embedded volume
+// numbers its blocks from there; and for classic HFS it is drAlBlSt*512, the
+// start of the allocation-block area rather than the start of the volume,
+// because classic HFS numbers allocation block 0 from there and not from sector
+// 0 — a volume offset would be wrong by the MDB and the bitmap on every read.
+//
+// To that this adds [Config.BaseOffset], so the result is always measured from
+// the start of the reader passed to [Open]. The two are NOT the same number and
+// must not be used interchangeably: Config.BaseOffset says where the volume
+// begins, this says where its allocation block 0 begins, and on classic HFS
+// they differ by the MDB and the bitmap. A volume opened at the start of the
+// reader with no configured offset reports zero, as before.
 //
 // Prefer [Volume.BlockOffset] to repeating the arithmetic; it rejects the
 // geometry that makes it overflow.
@@ -151,6 +162,14 @@ func (v *Volume) BlockOffset(block uint32) (int64, error) {
 	if blockSize == 0 {
 		return 0, &ParseError{Op: "block_offset", Offset: int64(block), Err: ErrCorrupt}
 	}
+	// The overflow check below converts baseOffset to uint64, so a negative one
+	// wraps to ~2^64, the subtraction underflows, and the guard never trips —
+	// it would return a garbage offset instead of an error. openAt rejects the
+	// inputs that could produce one, but the invariant is enforced here too,
+	// where it is relied on rather than only where it is established.
+	if v.baseOffset < 0 {
+		return 0, &ParseError{Op: "block_offset", Offset: int64(block), Err: ErrCorrupt}
+	}
 
 	rel := uint64(block) * blockSize
 	if rel > uint64(math.MaxInt64)-uint64(v.baseOffset) {
@@ -159,9 +178,17 @@ func (v *Volume) BlockOffset(block uint32) (int64, error) {
 	return v.baseOffset + int64(rel), nil
 }
 
-func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
+// parseVolumeHeader decodes an HFS+ or HFSX volume header.
+//
+// origin is the byte of the reader the header's volume begins at — for an
+// embedded volume, the wrapper's start plus the embedded extent — so that a
+// ParseError names the offset the bytes were actually read from. Before this
+// took a parameter, a bad embedded signature reported 1024 while the read that
+// fetched it had gone to embeddedOffset+1024.
+func parseVolumeHeader(buf []byte, origin int64) (VolumeHeader, FileSystemKind, error) {
+	hdrAt := origin + volumeHeaderOffset
 	if len(buf) < volumeHeaderSize {
-		return VolumeHeader{}, "", &ParseError{Op: "parse_header", Offset: volumeHeaderOffset, Err: ErrShortRead}
+		return VolumeHeader{}, "", &ParseError{Op: "parse_header", Offset: hdrAt, Err: ErrShortRead}
 	}
 
 	sig := be16(buf[volHdrSignature : volHdrSignature+2])
@@ -169,13 +196,13 @@ func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
 
 	kind, err := kindFromSignature(sig)
 	if err != nil {
-		return VolumeHeader{}, "", &ParseError{Op: "parse_signature", Offset: volumeHeaderOffset, Err: err}
+		return VolumeHeader{}, "", &ParseError{Op: "parse_signature", Offset: hdrAt, Err: err}
 	}
 	if kind == KindHFS {
-		return VolumeHeader{}, "", &ParseError{Op: "parse_signature", Offset: volumeHeaderOffset, Err: ErrUnsupportedFormat}
+		return VolumeHeader{}, "", &ParseError{Op: "parse_signature", Offset: hdrAt, Err: ErrUnsupportedFormat}
 	}
 	if err := validateVersion(kind, ver); err != nil {
-		return VolumeHeader{}, "", &ParseError{Op: "parse_version", Offset: volumeHeaderOffset + 2, Err: err}
+		return VolumeHeader{}, "", &ParseError{Op: "parse_version", Offset: hdrAt + 2, Err: err}
 	}
 
 	hdr := VolumeHeader{
@@ -214,7 +241,7 @@ func parseVolumeHeader(buf []byte) (VolumeHeader, FileSystemKind, error) {
 	hdr.StartupFile = parseForkData(buf[volHdrStartupFile : volHdrStartupFile+forkDataSize])
 
 	if hdr.BlockSize == 0 || hdr.TotalBlocks == 0 {
-		return VolumeHeader{}, "", &ParseError{Op: "validate_header", Offset: volumeHeaderOffset, Err: ErrCorrupt}
+		return VolumeHeader{}, "", &ParseError{Op: "validate_header", Offset: hdrAt, Err: ErrCorrupt}
 	}
 
 	return hdr, kind, nil
@@ -359,12 +386,17 @@ func (v *Volume) VolumeName() (string, error) {
 
 // hfsVolumeName reads drVN out of the classic HFS master directory block.
 func (v *Volume) hfsVolumeName() (string, error) {
+	// The MDB sits at volumeHeaderOffset from the start of the *volume*, which
+	// is v.volumeStart in the reader — not from the allocation-block area that
+	// v.baseOffset points at. Adding the wrong one of the two reads file data
+	// and decodes it as a name.
+	mdbAt := v.volumeStart + volumeHeaderOffset
 	if v.reader == nil {
-		return "", &ParseError{Op: "volume_name", Offset: volumeHeaderOffset, Err: ErrCorrupt}
+		return "", &ParseError{Op: "volume_name", Offset: mdbAt, Err: ErrCorrupt}
 	}
 
 	mdb := make([]byte, volumeHeaderSize)
-	if err := readAtExact(v.reader, volumeHeaderOffset, mdb); err != nil {
+	if err := readAtExact(v.reader, mdbAt, mdb); err != nil {
 		return "", err
 	}
 
@@ -374,7 +406,7 @@ func (v *Volume) hfsVolumeName() (string, error) {
 	if n == 0 {
 		return "", &ParseError{
 			Op:     "volume_name",
-			Offset: volumeHeaderOffset + hfsMDBOffVolumeName,
+			Offset: mdbAt + hfsMDBOffVolumeName,
 			Err:    ErrNotFound,
 		}
 	}

@@ -18,8 +18,11 @@ func TestReportVolumeSummary(t *testing.T) {
 		t.Fatalf("Report failed: %v", err)
 	}
 
-	if rep.Version != ReportVersion {
-		t.Fatalf("Version = %d, want %d", rep.Version, ReportVersion)
+	if rep.SchemaVersion != ReportVersion {
+		t.Fatalf("SchemaVersion = %d, want %d", rep.SchemaVersion, ReportVersion)
+	}
+	if rep.LibraryVersion != LibraryVersion {
+		t.Fatalf("LibraryVersion = %q, want %q", rep.LibraryVersion, LibraryVersion)
 	}
 	if rep.Generated.IsZero() {
 		t.Fatal("Generated was not stamped")
@@ -148,8 +151,14 @@ func TestReportRoundTripsThroughJSON(t *testing.T) {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
 
-	if back.Version != rep.Version || back.Volume.Kind != rep.Volume.Kind {
+	if back.SchemaVersion != rep.SchemaVersion || back.Volume.Kind != rep.Volume.Kind {
 		t.Fatalf("round trip lost volume fields: %#v", back.Volume)
+	}
+	if back.SchemaVersion == 0 {
+		t.Fatal("SchemaVersion did not survive the round trip")
+	}
+	if back.LibraryVersion != rep.LibraryVersion {
+		t.Fatalf("LibraryVersion = %q, want %q", back.LibraryVersion, rep.LibraryVersion)
 	}
 	if len(back.Files) != len(rep.Files) {
 		t.Fatalf("round trip lost files: %d vs %d", len(back.Files), len(rep.Files))
@@ -158,12 +167,41 @@ func TestReportRoundTripsThroughJSON(t *testing.T) {
 		t.Fatalf("round trip lost capabilities: %#v", back.Capabilities)
 	}
 
-	// The tags must actually be in force, so that consumers see lowerCamelCase
-	// keys rather than Go field names.
-	for _, key := range []string{`"version"`, `"volume"`, `"blockSize"`, `"baseOffset"`, `"capabilities"`, `"extendedAttributes"`} {
+	// The tags must actually be in force, so that consumers see snake_case keys
+	// rather than Go field names.
+	for _, key := range []string{
+		`"schema_version"`, `"library_version"`, `"volume"`, `"block_size"`,
+		`"base_offset"`, `"capabilities"`, `"extended_attributes"`,
+	} {
 		if !bytes.Contains(raw, []byte(key)) {
 			t.Fatalf("marshalled report has no %s key: %s", key, raw)
 		}
+	}
+
+	// The two version fields must be distinguishable in the JSON alone. Before
+	// v0.4.0 both were spelled "version", one level apart, and a consumer had no
+	// way to tell the schema version from the volume's on-disk format version
+	// without reading this package's source.
+	var doc struct {
+		SchemaVersion *int `json:"schema_version"`
+		Volume        struct {
+			Version *uint16 `json:"version"`
+		} `json:"volume"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("Unmarshal into the shape a consumer would use failed: %v", err)
+	}
+	if doc.SchemaVersion == nil {
+		t.Fatalf("no schema_version at the report root: %s", raw)
+	}
+	if *doc.SchemaVersion != ReportVersion {
+		t.Fatalf("schema_version = %d, want %d", *doc.SchemaVersion, ReportVersion)
+	}
+	if doc.Volume.Version == nil {
+		t.Fatalf("no version inside volume: %s", raw)
+	}
+	if *doc.Volume.Version != vol.Header().Version {
+		t.Fatalf("volume.version = %d, want the header's %d", *doc.Volume.Version, vol.Header().Version)
 	}
 }
 

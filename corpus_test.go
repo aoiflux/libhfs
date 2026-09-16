@@ -764,3 +764,161 @@ func TestCorpusPathsAndRanges(t *testing.T) {
 		}
 	}
 }
+
+// shiftedReaderAt presents r as though it began shiftBy bytes later.
+//
+// It exists so a corpus test can open a half-gigabyte image at a non-zero base
+// offset without copying it: the bytes before shiftBy read as 0xA5, and
+// everything at or after it comes from r. That is the same shape as a volume
+// sitting in a partition of a larger disk image, which is the case
+// Config.BaseOffset exists for.
+type shiftedReaderAt struct {
+	inner   io.ReaderAt
+	shiftBy int64
+}
+
+func (s shiftedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("negative offset")
+	}
+	n := 0
+	for n < len(p) && off+int64(n) < s.shiftBy {
+		p[n] = 0xA5
+		n++
+	}
+	if n == len(p) {
+		return n, nil
+	}
+	got, err := s.inner.ReadAt(p[n:], off+int64(n)-s.shiftBy)
+	return n + got, err
+}
+
+// TestCorpusBaseOffsetComposes is the H8 acceptance test against a real volume.
+//
+// The hermetic fixtures are built from the same reading of the spec as the
+// parser, so they cannot catch a misreading — and for classic HFS in particular
+// the suite has been demonstrably blind to a field read from the wrong offset.
+// This opens the corpus image twice, once at the start of the reader and once
+// at a non-zero base offset, and asserts the two agree on everything except the
+// offsets, which must differ by exactly the shift.
+func TestCorpusBaseOffsetComposes(t *testing.T) {
+	plain, f, cleanup := corpusImage(t)
+	defer cleanup()
+
+	const shift = int64(0x2A07)
+	shiftedReader := shiftedReaderAt{inner: f, shiftBy: shift}
+	shifted, err := OpenWithConfig(shiftedReader, Config{BaseOffset: shift})
+	if err != nil {
+		t.Fatalf("OpenWithConfig(BaseOffset=%d) failed: %v", shift, err)
+	}
+
+	if plain.Kind() != shifted.Kind() {
+		t.Fatalf("Kind differs: %s vs %s", plain.Kind(), shifted.Kind())
+	}
+	if got, want := shifted.BaseOffset(), plain.BaseOffset()+shift; got != want {
+		t.Fatalf("BaseOffset() = %d, want %d — the supplied offset must add to the derived %d, not replace it",
+			got, want, plain.BaseOffset())
+	}
+
+	// A real classic HFS volume has a non-zero derived base offset, and a real
+	// wrapped volume has a large one. On those images this assertion is the
+	// whole point: replace-semantics would report exactly shift.
+	if plain.BaseOffset() != 0 && shifted.BaseOffset() == shift {
+		t.Fatalf("BaseOffset() = %d, which is the supplied offset alone; the derived %d was discarded",
+			shifted.BaseOffset(), plain.BaseOffset())
+	}
+
+	if pn, sn := plainName(t, plain), plainName(t, shifted); pn != sn {
+		t.Fatalf("VolumeName differs: %q vs %q", pn, sn)
+	}
+	if pf, sf := plain.Header().FileCount, shifted.Header().FileCount; pf != sf {
+		t.Fatalf("FileCount differs: %d vs %d", pf, sf)
+	}
+
+	// Allocation state comes from the bitmap, which on classic HFS is addressed
+	// from the volume start rather than from the allocation-block area — the
+	// one place the two offsets must compose differently.
+	pFree, err := plain.FreeBlockCount()
+	if err != nil {
+		t.Fatalf("FreeBlockCount failed: %v", err)
+	}
+	sFree, err := shifted.FreeBlockCount()
+	if err != nil {
+		t.Fatalf("FreeBlockCount on the shifted volume failed: %v", err)
+	}
+	if pFree != sFree {
+		t.Fatalf("FreeBlockCount differs: %d vs %d — the bitmap was read from the wrong origin", pFree, sFree)
+	}
+
+	skipEmptyCorpus(t, plain, "files to compare byte ranges for")
+
+	// Every reported range must move by exactly the shift, and the bytes at the
+	// shifted offset must still be the file's. Bounded, because this runs
+	// against half-gigabyte images.
+	checked := 0
+	err = plain.WalkPaths(func(_ string, rec CatalogRecord) error {
+		if rec.Type != CatalogRecordFile || rec.DataFork.LogicalSize == 0 {
+			return nil
+		}
+		pr, err := plain.DataForkRanges(rec.CNID)
+		if err != nil || len(pr) == 0 {
+			return nil
+		}
+		sr, err := shifted.DataForkRanges(rec.CNID)
+		if err != nil {
+			t.Fatalf("cnid %d: DataForkRanges on the shifted volume failed: %v", rec.CNID, err)
+		}
+		if len(pr) != len(sr) {
+			t.Fatalf("cnid %d: range counts differ: %d vs %d", rec.CNID, len(pr), len(sr))
+		}
+		for i := range pr {
+			if sr[i].DiskOffset-pr[i].DiskOffset != shift {
+				t.Fatalf("cnid %d range %d: DiskOffset moved by %d, want %d",
+					rec.CNID, i, sr[i].DiskOffset-pr[i].DiskOffset, shift)
+			}
+			if pr[i].Length != sr[i].Length {
+				t.Fatalf("cnid %d range %d: Length changed: %d vs %d", rec.CNID, i, pr[i].Length, sr[i].Length)
+			}
+		}
+
+		// Read the first range from the image itself at both offsets. This is
+		// the criterion the request states: identical content at offsets that
+		// differ by exactly the base offset.
+		if n := pr[0].Length; n > 0 && n <= 4096 {
+			want := make([]byte, n)
+			if _, err := f.ReadAt(want, pr[0].DiskOffset); err != nil {
+				return nil
+			}
+			got := make([]byte, n)
+			if _, err := shiftedReader.ReadAt(got, sr[0].DiskOffset); err != nil {
+				t.Fatalf("cnid %d: reading the shifted image at DiskOffset failed: %v", rec.CNID, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("cnid %d: content at the shifted DiskOffset differs from the original", rec.CNID)
+			}
+		}
+
+		checked++
+		if checked >= 64 {
+			return ErrStopWalk
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrStopWalk) {
+		t.Fatalf("WalkPaths failed: %v", err)
+	}
+	if checked == 0 {
+		t.Fatal("no file with a data fork was compared; the test proved nothing")
+	}
+	t.Logf("compared %d files at baseOffset %d (derived %d + supplied %d)",
+		checked, shifted.BaseOffset(), plain.BaseOffset(), shift)
+}
+
+func plainName(tb testing.TB, vol *Volume) string {
+	tb.Helper()
+	name, err := vol.VolumeName()
+	if err != nil {
+		return ""
+	}
+	return name
+}

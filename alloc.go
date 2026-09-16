@@ -144,11 +144,13 @@ func (v *Volume) readBitmapAt(off int64, dst []byte) error {
 		//
 		// baseOffset is deliberately not added. On classic HFS it is
 		// drAlBlSt*512, the start of the allocation-block area, and drVBMSt is
-		// measured from the same origin — the start of the volume, which for a
-		// volume read as classic HFS is always offset zero in the reader. The
-		// bitmap sits before the allocation-block area, between it and the MDB,
-		// so adding the two would skip past the bitmap into file data and
-		// silently report another file's bytes as allocation state.
+		// measured from the same origin — the start of the volume. The bitmap
+		// sits before the allocation-block area, between it and the MDB, so
+		// adding the two would skip past the bitmap into file data and silently
+		// report another file's bytes as allocation state.
+		//
+		// hfsBitmapOffset supplies the volume's own start instead, which is
+		// zero unless the caller set [Config.BaseOffset].
 		return readAtExact(v.reader, v.hfsBitmapOffset()+off, dst)
 	}
 
@@ -162,12 +164,12 @@ func (v *Volume) readBitmapAt(off int64, dst []byte) error {
 	return readFromExtents(v.reader, exts, v.header.BlockSize, v.baseOffset, off, dst)
 }
 
-// hfsBitmapOffset returns the byte offset of the classic HFS volume bitmap,
-// relative to the start of the volume.
+// hfsBitmapOffset returns the byte offset of the classic HFS volume bitmap in
+// the reader the volume was opened with.
 //
-// It is not relative to the allocation-block area: drVBMSt counts 512-byte
-// sectors from the volume start, and the bitmap sits between the MDB and the
-// first allocation block.
+// drVBMSt counts 512-byte sectors from the volume start, so this composes with
+// volumeStart and not with baseOffset: the bitmap sits between the MDB and the
+// first allocation block, so it is before the origin baseOffset names.
 func (v *Volume) hfsBitmapOffset() int64 {
-	return int64(v.hfsVBMStart) * hfsSectorSize
+	return v.volumeStart + int64(v.hfsVBMStart)*hfsSectorSize
 }

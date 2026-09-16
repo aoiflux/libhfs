@@ -12,6 +12,15 @@ import (
 // document it does not understand rather than misread one.
 const ReportVersion = 1
 
+// LibraryVersion is the release of this package stamped into every [Report].
+//
+// It is maintained by hand and must be bumped with the tag. Nothing in the test
+// suite can detect a forgotten bump — the module knows nothing about its own
+// version at compile time — so a report from an untagged build of the tree
+// claims whatever this said when it was last edited. Treat it as the answer to
+// "which release was this written against", not as a proof of provenance.
+const LibraryVersion = "v0.4.0"
+
 // DefaultReportMaxFiles bounds the file listing when [ReportOptions] asks for
 // one without saying how many.
 const DefaultReportMaxFiles = 10000
@@ -38,8 +47,20 @@ const DefaultReportMaxFiles = 10000
 // [Volume.FreeBlockCount] for the observed figure, and note that a mismatch
 // between the two is itself a finding.
 type Report struct {
-	// Version is [ReportVersion], the schema this document follows.
-	Version int `json:"version"`
+	// SchemaVersion is [ReportVersion], the schema this document follows.
+	//
+	// It is named for the schema rather than simply "version" because the
+	// volume's own on-disk format version lives one level down at
+	// [VolumeSummary.Version]. The two are unrelated facts, and while both were
+	// serialised as "version" a consumer could not tell which it was reading
+	// without the Go source in front of it.
+	SchemaVersion int `json:"schema_version"`
+
+	// LibraryVersion is [LibraryVersion], the release of this package that
+	// produced the document. A report is evidence, and evidence has to stay
+	// re-readable by a tool built against a different release; this says which
+	// one wrote it.
+	LibraryVersion string `json:"library_version"`
 
 	// Generated is when the report was built, not a fact about the volume.
 	Generated time.Time `json:"generated"`
@@ -56,18 +77,23 @@ type Report struct {
 	// report built without a file listing walks much less of the volume and so
 	// contributes correspondingly little of its own.
 	Anomalies    []Anomaly `json:"anomalies"`
-	AnomalyTotal int       `json:"anomalyTotal"`
+	AnomalyTotal int       `json:"anomaly_total"`
 
 	// Files is present only when [ReportOptions].IncludeFiles asked for it.
 	// FilesTruncated says the listing stopped at the bound rather than at the
 	// end of the catalog.
 	Files          []FileSummary `json:"files"`
-	FilesTruncated bool          `json:"filesTruncated"`
+	FilesTruncated bool          `json:"files_truncated"`
 }
 
 // VolumeSummary is the volume's identity and geometry.
 type VolumeSummary struct {
-	Kind    string `json:"kind"`
+	Kind string `json:"kind"`
+
+	// Version is the volume format version recorded in the volume header —
+	// 4 for HFS+, 5 for HFSX, 0 for classic HFS, which has no such field. It
+	// is a fact about the volume on disk and has nothing to do with
+	// [Report.SchemaVersion], which describes this document.
 	Version uint16 `json:"version"`
 
 	// Name is the volume's name. It is empty when the volume has none that
@@ -85,18 +111,20 @@ type VolumeSummary struct {
 
 	// BaseOffset is the image byte offset of allocation block 0. It is
 	// reported because every block number in this document is meaningless
-	// without it. See [Volume.BaseOffset].
-	BaseOffset int64 `json:"baseOffset"`
+	// without it. See [Volume.BaseOffset], whose value this is — note that it
+	// is not the same quantity as [Config.BaseOffset], which says where the
+	// volume begins rather than where its allocation blocks are numbered from.
+	BaseOffset int64 `json:"base_offset"`
 
-	BlockSize   uint32 `json:"blockSize"`
-	TotalBlocks uint32 `json:"totalBlocks"`
-	FreeBlocks  uint32 `json:"freeBlocks"`
-	TotalBytes  uint64 `json:"totalBytes"`
-	FreeBytes   uint64 `json:"freeBytes"`
+	BlockSize   uint32 `json:"block_size"`
+	TotalBlocks uint32 `json:"total_blocks"`
+	FreeBlocks  uint32 `json:"free_blocks"`
+	TotalBytes  uint64 `json:"total_bytes"`
+	FreeBytes   uint64 `json:"free_bytes"`
 
-	FileCount     uint32 `json:"fileCount"`
-	FolderCount   uint32 `json:"folderCount"`
-	NextCatalogID uint32 `json:"nextCatalogID"`
+	FileCount     uint32 `json:"file_count"`
+	FolderCount   uint32 `json:"folder_count"`
+	NextCatalogID uint32 `json:"next_catalog_id"`
 	Journaled     bool   `json:"journaled"`
 
 	Created  *time.Time `json:"created"`
@@ -109,7 +137,7 @@ type VolumeSummary struct {
 type FileSummary struct {
 	Path       string `json:"path"`
 	CNID       uint32 `json:"cnid"`
-	ParentCNID uint32 `json:"parentCNID"`
+	ParentCNID uint32 `json:"parent_cnid"`
 	Name       string `json:"name"`
 	Type       string `json:"type"`
 
@@ -118,13 +146,13 @@ type FileSummary struct {
 	Identity string `json:"identity"`
 
 	Size         uint64 `json:"size"`
-	ResourceSize uint64 `json:"resourceSize"`
+	ResourceSize uint64 `json:"resource_size"`
 
 	Compressed      bool   `json:"compressed"`
-	CompressionType uint32 `json:"compressionType"`
+	CompressionType uint32 `json:"compression_type"`
 
 	Link       string `json:"link"`
-	LinkTarget uint32 `json:"linkTarget"`
+	LinkTarget uint32 `json:"link_target"`
 
 	Mode uint16 `json:"mode"`
 	UID  uint32 `json:"uid"`
@@ -135,15 +163,15 @@ type FileSummary struct {
 
 	// FinderInfo is the record's 32 bytes of Finder metadata as hex. It is the
 	// empty string when they are all zero, which is the case on classic HFS.
-	FinderInfo string `json:"finderInfo"`
+	FinderInfo string `json:"finder_info"`
 }
 
 // TimeSummary is a [CatalogTimes] with absent stamps encoded as null rather
 // than as the zero time.
 type TimeSummary struct {
 	Created         *time.Time `json:"created"`
-	ContentModified *time.Time `json:"contentModified"`
-	AttrModified    *time.Time `json:"attrModified"`
+	ContentModified *time.Time `json:"content_modified"`
+	AttrModified    *time.Time `json:"attr_modified"`
 	Accessed        *time.Time `json:"accessed"`
 	Backup          *time.Time `json:"backup"`
 	Source          string     `json:"source"`
@@ -213,10 +241,11 @@ func (v *Volume) ReportContext(ctx context.Context, opts *ReportOptions) (Report
 	}
 
 	rep := Report{
-		Version:      ReportVersion,
-		Generated:    time.Now().UTC(),
-		Volume:       v.volumeSummary(),
-		Capabilities: v.Capabilities(),
+		SchemaVersion:  ReportVersion,
+		LibraryVersion: LibraryVersion,
+		Generated:      time.Now().UTC(),
+		Volume:         v.volumeSummary(),
+		Capabilities:   v.Capabilities(),
 	}
 
 	if cfg.IncludeFiles {

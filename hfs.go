@@ -24,9 +24,13 @@
 //
 //	entries, err := vol.ReadDir("/")
 //
-// A volume nested inside a partition or an HFS wrapper can be reached by
-// wrapping the reader in an [io.SectionReader]; wrappers containing an embedded
-// HFS+ filesystem are detected and followed automatically.
+// A volume nested inside a partition can be reached either by setting
+// [Config.BaseOffset] to the byte it begins at, or by wrapping the reader in an
+// [io.SectionReader]. Prefer the first when the offsets this package reports
+// must be absolute against the whole image: a SectionReader makes every
+// reported offset partition-relative, and nothing says so at the point of use.
+// Wrappers containing an embedded HFS+ filesystem are detected and followed
+// automatically either way.
 //
 // # Reading the filesystem
 //
@@ -117,9 +121,10 @@
 // Block addressing. An [ExtentDescriptor] counts in allocation blocks, and a
 // block number is not a byte offset. The byte a block begins at is
 // [Volume.BaseOffset] plus the block number times the block size, and the base
-// offset is non-zero for classic HFS and for any HFS+ volume embedded in an HFS
-// wrapper — exactly the volumes where getting it wrong matters. It is wrong
-// silently: the read succeeds and returns another part of the image. Prefer
+// offset is non-zero for classic HFS, for any HFS+ volume embedded in an HFS
+// wrapper, and for any volume opened with a [Config.BaseOffset] — exactly the
+// volumes where getting it wrong matters. It is wrong silently: the read
+// succeeds and returns another part of the image. Prefer
 // [Volume.DataForkRanges] and [Volume.ExtentRanges], which do the conversion.
 // In a [ByteRange], Length stops at the fork's logical size and Slack counts
 // the allocated bytes after it, so reading Length bytes never picks up what the
@@ -190,7 +195,11 @@
 //	}
 package libhfs
 
-import "io"
+import (
+	"errors"
+	"io"
+	"math"
+)
 
 // Open reads the volume header at the start of r and returns a handle to the
 // filesystem it describes.
@@ -205,23 +214,43 @@ import "io"
 // are resolved relative to the embedded volume, so callers need not know whether
 // a wrapper was present.
 //
-// The volume must begin at offset 0 of r. To read one inside a partition, pass
-// an [io.SectionReader] covering it.
+// The volume must begin at offset 0 of r. To read one inside a partition of a
+// whole-disk image, use [OpenWithConfig] with [Config.BaseOffset] set to the
+// byte the volume begins at — every offset reported then stays absolute against
+// the image. Wrapping the partition in an [io.SectionReader] also works, but
+// makes every reported offset partition-relative, which is silent at the point
+// of use.
 //
 // A malformed or unrecognised volume yields a [ParseError] wrapping
 // [ErrInvalidSignature], [ErrUnsupportedVer] or [ErrCorrupt]; use [IsCorrupt]
 // to test for the group.
 func Open(r io.ReaderAt) (*Volume, error) {
+	return openAt(r, 0)
+}
+
+// openAt is Open with the volume placed at an arbitrary byte of r.
+//
+// volumeStart is where the volume's own header lives — for a wrapped volume,
+// where the *wrapper* begins, since that is what a caller can see from outside.
+// The offset the wrapper's embedded volume adds on top is discovered here, not
+// supplied, and the two compose rather than conflict: see [Config.BaseOffset].
+func openAt(r io.ReaderAt, volumeStart int64) (*Volume, error) {
+	// The nil guard lives here rather than in Open because OpenWithConfig
+	// reaches this function directly; leaving it upstream would turn
+	// OpenWithConfig(nil, cfg) into a panic inside readAtExact.
 	if r == nil {
 		return nil, &ParseError{Op: "open", Offset: 0, Err: ErrCorrupt}
 	}
+	if volumeStart < 0 {
+		return nil, &ParseError{Op: "open", Offset: volumeStart, Err: ErrInvalidOffset}
+	}
 
 	buf := make([]byte, volumeHeaderSize)
-	if err := readAtExact(r, volumeHeaderOffset, buf); err != nil {
+	if err := readVolumeStartHeader(r, volumeStart, buf); err != nil {
 		return nil, err
 	}
 
-	baseOffset := int64(0)
+	derived := int64(0)
 	if be16(buf[0:2]) == signatureHFS {
 		embeddedOffset, ok := parseHFSWrapperEmbeddedOffset(buf)
 		if !ok {
@@ -231,43 +260,95 @@ func Open(r io.ReaderAt) (*Volume, error) {
 			// own filesystem is still readable even when the HFS+ volume it
 			// points at is not. Reporting an error instead would discard
 			// recoverable data.
-			hdr, hfsBase, vbmStart, err := parseHFSMasterDirectoryBlock(buf)
+			hdr, hfsBase, vbmStart, err := parseHFSMasterDirectoryBlock(buf, volumeStart)
 			if err != nil {
 				return nil, err
 			}
-			vol := newVolume(r, KindHFS, hdr, hfsBase)
+			if err := checkBaseOffsetFits(volumeStart, hfsBase); err != nil {
+				return nil, err
+			}
+			vol := newVolume(r, KindHFS, hdr, volumeStart, hfsBase)
 			vol.hfsVBMStart = vbmStart
 			return vol, nil
 		}
 		// An HFS wrapper around an embedded HFS+ volume: re-read the header
-		// from the embedded volume and treat its start as the base offset.
-		if err := readAtExact(r, embeddedOffset+volumeHeaderOffset, buf); err != nil {
+		// from the embedded volume and treat its start as the derived offset.
+		if err := checkBaseOffsetFits(volumeStart, embeddedOffset); err != nil {
 			return nil, err
 		}
-		baseOffset = embeddedOffset
+		// Not readVolumeStartHeader: a short read here means the wrapper's
+		// embedded extent points past the end of the image, which is a fact
+		// about the volume. Attributing it to the caller's offset would send
+		// them looking in the wrong place.
+		if err := readAtExact(r, volumeStart+embeddedOffset+volumeHeaderOffset, buf); err != nil {
+			return nil, err
+		}
+		derived = embeddedOffset
 	}
 
-	hdr, kind, err := parseVolumeHeader(buf)
+	hdr, kind, err := parseVolumeHeader(buf, volumeStart+derived)
 	if err != nil {
 		return nil, err
 	}
 
-	return newVolume(r, kind, hdr, baseOffset), nil
+	return newVolume(r, kind, hdr, volumeStart, derived), nil
+}
+
+// readVolumeStartHeader reads the header at the start of the volume, reporting
+// a short read against volumeStart rather than against the header itself.
+//
+// This is the read that establishes whether volumeStart points anywhere useful,
+// so it is the one that should say so. A caller who mistypes
+// [Config.BaseOffset] and lands past the end of the image otherwise gets
+// ErrShortRead attributed to the header — "this acquisition is truncated",
+// which is a misleading forensic finding when the image is intact and only the
+// offset was wrong. io.ReaderAt exposes no size, and asserting for one would
+// narrow the reader contract this package documents, so a short read is the
+// only signal available; naming volumeStart in the error is what makes it
+// legible.
+//
+// A volume at the start of the reader keeps the original error, because there
+// the short read really is about the image and there is no supplied offset to
+// blame.
+func readVolumeStartHeader(r io.ReaderAt, volumeStart int64, buf []byte) error {
+	err := readAtExact(r, volumeStart+volumeHeaderOffset, buf)
+	if err != nil && volumeStart != 0 && errors.Is(err, ErrShortRead) {
+		return &ParseError{Op: "open", Offset: volumeStart, Err: ErrShortRead}
+	}
+	return err
+}
+
+// checkBaseOffsetFits rejects a base offset that would overflow int64.
+//
+// A derived offset is bounded by the volume's own fields — at most about
+// 2.8e14 for an embedded extent — but a caller-supplied volumeStart is not, and
+// a baseOffset that wrapped negative would defeat the overflow guard in
+// [Volume.BlockOffset] rather than trip it.
+func checkBaseOffsetFits(volumeStart, derived int64) error {
+	if derived < 0 || volumeStart > math.MaxInt64-derived {
+		return &ParseError{Op: "open", Offset: volumeStart, Err: ErrInvalidOffset}
+	}
+	return nil
 }
 
 // newVolume builds a Volume with default configuration.
 //
-// Open reaches this from two paths — a classic HFS master directory block and
+// openAt reaches this from two paths — a classic HFS master directory block and
 // an HFS+ volume header — which must not drift apart in what they initialise.
 // Adding a field to Volume and forgetting one of them is exactly the kind of
 // omission a single constructor prevents.
-func newVolume(r io.ReaderAt, kind FileSystemKind, hdr VolumeHeader, baseOffset int64) *Volume {
+//
+// derived is the offset the volume itself implies for allocation block 0,
+// measured from the volume's own start. It is added to volumeStart rather than
+// replacing it, which is the whole of the composition rule.
+func newVolume(r io.ReaderAt, kind FileSystemKind, hdr VolumeHeader, volumeStart, derived int64) *Volume {
 	cfg := DefaultConfig().normalise()
 	return &Volume{
 		reader:       r,
 		kind:         kind,
 		header:       hdr,
-		baseOffset:   baseOffset,
+		volumeStart:  volumeStart,
+		baseOffset:   volumeStart + derived,
 		cacheMax:     cfg.CacheSize,
 		nodeCacheMax: cfg.NodeCacheSize,
 		maxAlloc:     cfg.MaxAlloc,

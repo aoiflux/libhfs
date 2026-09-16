@@ -118,6 +118,41 @@ type Config struct {
 	// mean "default", while this means "none", which a Config literal can
 	// express without knowing the defaults.
 	DisableCache bool
+
+	// BaseOffset is the byte of the reader at which the volume begins.
+	//
+	// Set it when the reader is a whole disk image and the volume lives in a
+	// partition part-way through it. Every offset the package then reports —
+	// [ByteRange.DiskOffset], a [DeletedRecord.ByteOffset] carved from
+	// unallocated space, [VolumeSummary.BaseOffset] — stays absolute against
+	// that image. The alternative, wrapping the partition in an
+	// [io.SectionReader], also reads the volume correctly but makes every
+	// reported offset partition-relative, and nothing at the point of use says
+	// so; intersecting those against whole-image offsets yields a confident
+	// wrong answer rather than an error.
+	//
+	// It ADDS to the offset [Open] derives, and does not replace it. For an
+	// image holding a partition at byte N that contains an HFS wrapper whose
+	// embedded HFS+ volume starts W bytes into the wrapper, set this to N — the
+	// wrapper's start, which is all a caller can see from outside — and
+	// [Volume.BaseOffset] reports N+W. Assuming it replaces rather than composes
+	// produces offsets wrong by exactly W, which is small enough to look
+	// plausible.
+	//
+	// Note that this and [Volume.BaseOffset] are deliberately named alike
+	// across this library's siblings but are NOT the same quantity: this is
+	// where the volume begins, that is where its allocation block 0 begins. On
+	// classic HFS they differ by the MDB and the bitmap, so on a volume opened
+	// with BaseOffset N, Config().BaseOffset is N while Volume.BaseOffset() is
+	// N+drAlBlSt*512.
+	//
+	// Zero means the volume begins at the start of the reader, which is what
+	// [Open] does, so leaving it unset changes nothing. A negative value is
+	// rejected at open with [ErrInvalidOffset]; unlike the other fields here a
+	// negative value is not clamped, because a sign error in an offset is a bug
+	// in the caller and reading the wrong part of an image is the outcome this
+	// field exists to prevent.
+	BaseOffset int64
 }
 
 // DefaultConfig returns the configuration [Open] uses.
@@ -188,6 +223,10 @@ func (v *Volume) Config() Config {
 	if v == nil {
 		return DefaultConfig()
 	}
+	// volumeStart belongs to the write-once group above mu and needs no lock;
+	// it is read inside the critical section only to keep the literal in one
+	// piece. It is deliberately absent from applyConfig: every unsynchronised
+	// read of baseOffset would race a post-open setter, so there is none.
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return Config{
@@ -196,6 +235,7 @@ func (v *Volume) Config() Config {
 		MaxAlloc:      v.maxAlloc,
 		TextEncoding:  v.textEncoding,
 		CarveWorkers:  v.carveWorkers,
+		BaseOffset:    v.volumeStart,
 	}
 }
 
@@ -225,12 +265,17 @@ func (v *Volume) SetCarveWorkers(n int) {
 //
 // The zero Config is valid and matches Open's behaviour, so this is only needed
 // to change a default. See [Config] for the individual fields.
+//
+// Unlike the other fields, [Config.BaseOffset] is honoured during the open
+// rather than applied to the volume afterwards — it decides where the header is
+// read from, so it cannot be a post-open adjustment.
 func OpenWithConfig(r io.ReaderAt, cfg Config) (*Volume, error) {
-	vol, err := Open(r)
+	norm := cfg.normalise()
+	vol, err := openAt(r, norm.BaseOffset)
 	if err != nil {
 		return nil, err
 	}
-	vol.applyConfig(cfg.normalise())
+	vol.applyConfig(norm)
 	return vol, nil
 }
 

@@ -2,6 +2,7 @@ package libhfs
 
 import (
 	"bytes"
+	"math"
 	"testing"
 )
 
@@ -295,4 +296,68 @@ func TestParsersRejectCorruptedBytes(t *testing.T) {
 			_, _ = vol.Report(&ReportOptions{IncludeFiles: true, MaxFiles: 64})
 		}
 	}
+}
+
+// FuzzOpenAt fuzzes the path a caller-supplied base offset takes.
+//
+// FuzzOpen only ever opens at offset zero, where volumeStart is zero and the
+// composition in newVolume is a no-op. Here the same adversarial bytes are
+// placed part-way through a larger buffer, so baseOffset is non-zero for every
+// input — which is where BlockOffset's overflow arithmetic lives, and where a
+// geometry that would merely be rejected at offset zero can instead produce an
+// offset that overflows.
+//
+// The offset itself is fuzzed rather than fixed, because a value near MaxInt64
+// is the one that matters and no fixed seed would find it.
+func FuzzOpenAt(f *testing.F) {
+	for _, seed := range [][]byte{
+		buildValidCatalogImage(f),
+		buildClassicHFSTimesImage(f),
+		buildWrappedHFSPlusImage(f),
+		buildXAttrImage(f),
+		[]byte("not a filesystem"),
+	} {
+		f.Add(seed, int64(0))
+		f.Add(seed, embedOffset)
+		f.Add(seed, int64(-1))
+		f.Add(seed, int64(math.MaxInt64))
+		f.Add(seed, int64(math.MaxInt64)-embedOffset)
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte, off int64) {
+		// The volume is placed at a bounded offset in a real buffer, while the
+		// offset handed to the library is whatever the fuzzer chose. The two
+		// agreeing is the ordinary case; them disagreeing is what exercises the
+		// rejection paths.
+		padded := make([]byte, int(embedOffset)+len(data))
+		for i := range int(embedOffset) {
+			padded[i] = embedFill
+		}
+		copy(padded[embedOffset:], data)
+
+		vol, err := OpenWithConfig(bytes.NewReader(padded), Config{BaseOffset: off})
+		if err != nil {
+			return
+		}
+		if off < 0 {
+			t.Fatalf("a negative BaseOffset (%d) opened a volume", off)
+		}
+		if vol.BaseOffset() < 0 {
+			t.Fatalf("BaseOffset() = %d is negative for a volume that opened at %d",
+				vol.BaseOffset(), off)
+		}
+
+		vol.SetMaxAlloc(1 << 20)
+		_, _ = vol.GetRootDirectory()
+		_, _ = vol.ReadDir("/")
+		_ = vol.WalkCatalog(func(CatalogRecord) error { return nil })
+		_ = vol.WalkPaths(func(string, CatalogRecord) error { return nil })
+		_, _ = vol.BlockOffset(0)
+		_, _ = vol.BlockOffset(^uint32(0))
+		_, _ = vol.DataForkRanges(rootFolderCNID)
+		_, _ = vol.ResourceForkRanges(rootFolderCNID)
+		_, _ = vol.FreeBlockCount()
+		_, _ = vol.VolumeName()
+		_, _ = vol.Report(nil)
+	})
 }

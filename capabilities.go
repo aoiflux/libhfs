@@ -17,11 +17,11 @@ const (
 // access times" from "every access time happened to be zero".
 type Capabilities struct {
 	// ExtendedAttributes reports whether the volume has an attributes B-tree.
-	ExtendedAttributes bool `json:"extendedAttributes"`
+	ExtendedAttributes bool `json:"extended_attributes"`
 
 	// HardLinks reports whether the format supports hard links. Classic HFS
 	// does not.
-	HardLinks bool `json:"hardLinks"`
+	HardLinks bool `json:"hard_links"`
 
 	// Compression reports whether the format supports decmpfs compression,
 	// which requires extended attributes.
@@ -30,19 +30,19 @@ type Capabilities struct {
 	// AccessTimes reports whether catalog records carry an access date.
 	// Classic HFS has no such field, so CatalogTimes.Accessed is always zero
 	// there — a fact about the format, not about the files.
-	AccessTimes bool `json:"accessTimes"`
+	AccessTimes bool `json:"access_times"`
 
 	// AttrModTimes reports whether catalog records carry an
 	// attribute-modification date. Classic HFS does not.
-	AttrModTimes bool `json:"attrModTimes"`
+	AttrModTimes bool `json:"attr_mod_times"`
 
 	// POSIXPermissions reports whether catalog records carry BSD ownership and
 	// mode. Classic HFS predates it.
-	POSIXPermissions bool `json:"posixPermissions"`
+	POSIXPermissions bool `json:"posix_permissions"`
 
 	// CaseSensitive reports whether name comparison is case-sensitive. Only
 	// HFSX volumes formatted that way are.
-	CaseSensitive bool `json:"caseSensitive"`
+	CaseSensitive bool `json:"case_sensitive"`
 
 	// Journaled reports whether the volume has a journal. This package does not
 	// read the journal, but its presence tells an examiner that a source of
@@ -51,7 +51,7 @@ type Capabilities struct {
 
 	// UnicodeNames reports whether names are stored as Unicode. Classic HFS
 	// stores bytes in a Mac script encoding instead — see Volume.SetTextEncoding.
-	UnicodeNames bool `json:"unicodeNames"`
+	UnicodeNames bool `json:"unicode_names"`
 }
 
 // Capabilities returns what this volume's format supports.
