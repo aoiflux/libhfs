@@ -463,8 +463,9 @@ out, _ := json.MarshalIndent(rep, "", "  ")
   the root is the schema this document follows; `library_version` is the release
   that wrote it; `generated` is when. Note that `volume.version` is a different
   thing entirely — the volume's on-disk format version — which is why the
-  schema one is not simply called `version`. Both spellings changed in v0.4.0;
-  see [CHANGELOG.md](CHANGELOG.md) for the full key mapping.
+  schema one is not simply called `version`. Both spellings changed in v0.3.2 —
+  a patch release, but a breaking one for anything parsing these documents, so
+  read [CHANGELOG.md](CHANGELOG.md) for the full key mapping before upgrading.
 
 ## Concurrency
 

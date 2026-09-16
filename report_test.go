@@ -179,7 +179,7 @@ func TestReportRoundTripsThroughJSON(t *testing.T) {
 	}
 
 	// The two version fields must be distinguishable in the JSON alone. Before
-	// v0.4.0 both were spelled "version", one level apart, and a consumer had no
+	// v0.3.2 both were spelled "version", one level apart, and a consumer had no
 	// way to tell the schema version from the volume's on-disk format version
 	// without reading this package's source.
 	var doc struct {

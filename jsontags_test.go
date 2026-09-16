@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// camelKey matches the spelling this package used before v0.4.0. The other five
+// camelKey matches the spelling this package used before v0.3.2. The other five
 // libraries in this family tag exclusively in snake_case, and a pipeline that
 // deserialises reports from more than one of them had to special-case exactly
 // this one.
@@ -33,7 +33,7 @@ func exportedTaggedValues(rep Report) []any {
 	}
 }
 
-// TestJSONKeysAreSnakeCase is the acceptance test for the v0.4.0 tag
+// TestJSONKeysAreSnakeCase is the acceptance test for the v0.3.2 tag
 // conversion. It walks the decoded document rather than regexing the raw bytes,
 // because a string *value* containing camelCase — a filename, a link target, a
 // hex Finder info blob — is not a violation and must not fail this.

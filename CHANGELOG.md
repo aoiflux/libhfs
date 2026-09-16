@@ -1,10 +1,12 @@
 # Changelog
 
-All notable changes to libhfs are recorded here. Versions follow semantic
-versioning; while the module is pre-1.0 a minor bump may break compatibility,
-and every such break is listed under **Breaking** below.
+All notable changes to libhfs are recorded here. While the module is pre-1.0,
+any release — patch included — may break compatibility, so read the **Breaking**
+section of every entry between the version you are on and the one you are moving
+to. Nothing in a version number here is a compatibility promise; the Breaking
+sections are.
 
-## v0.4.0
+## v0.3.2
 
 Two breaking changes to the JSON report's wire format, shipped together so
 consumers absorb one break rather than two, and one additive open-time option.

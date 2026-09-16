@@ -19,7 +19,7 @@ const ReportVersion = 1
 // version at compile time — so a report from an untagged build of the tree
 // claims whatever this said when it was last edited. Treat it as the answer to
 // "which release was this written against", not as a proof of provenance.
-const LibraryVersion = "v0.4.0"
+const LibraryVersion = "v0.3.2"
 
 // DefaultReportMaxFiles bounds the file listing when [ReportOptions] asks for
 // one without saying how many.
